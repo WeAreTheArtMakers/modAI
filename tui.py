@@ -155,6 +155,7 @@ def read_editor_event(descriptor: int) -> tuple[str, str]:
 
 
 class Dashboard:
+    _alternate_active = False
     CYAN = "\033[38;5;45m"
     BLUE = "\033[38;5;39m"
     GREEN = "\033[38;5;84m"
@@ -190,14 +191,22 @@ class Dashboard:
 
     @staticmethod
     def clear() -> None:
-        sys.stdout.write("\033[2J\033[H")
+        if Dashboard._alternate_active:
+            sys.stdout.write('\033[?1049l')
+            Dashboard._alternate_active = False
+        else:
+            sys.stdout.write('\r\033[J')
         sys.stdout.flush()
 
     @staticmethod
     def _draw(lines: Sequence[str]) -> None:
         # Use explicit CRLF so every line starts in column zero even when the
         # parent terminal was left with output post-processing disabled.
-        frame = "\033[2J\033[H" + "\r\n".join(lines) + "\r\n"
+        prefix = ''
+        if interactive_terminal() and not Dashboard._alternate_active:
+            prefix = '\033[?1049h'
+            Dashboard._alternate_active = True
+        frame = prefix + "\033[H\033[J" + "\r\n".join(lines) + "\r\n"
         sys.stdout.write(frame)
         sys.stdout.flush()
 
@@ -214,29 +223,37 @@ class Dashboard:
             return None
         selected = max(0, min(selected, len(options) - 1))
         while True:
+            terminal = shutil.get_terminal_size((100, 30))
+            width = max(10, terminal.columns - 1)
+            def fit(text: str) -> str:
+                return text if len(text) <= width else text[:width-1] + '…'
             lines: list[str] = []
             if show_logo:
-                if shutil.get_terminal_size((100, 30)).columns >= 60:
+                if terminal.columns >= 60 and terminal.lines >= 22:
                     lines.extend(self.paint(line, "CYAN", "BOLD") for line in self.LOGO)
                 else:
                     lines.append(self.paint("  MODAI", "CYAN", "BOLD"))
-                lines.extend((self.paint("  " + self.t("subtitle"), "DIM"), ""))
+                lines.extend((self.paint(fit("  " + self.t("subtitle")), "DIM"), ""))
             lines.extend((
-                self.paint(f"  {title}", "WHITE", "BOLD"),
-                self.paint(f"  {subtitle or self.t('choose_hint')}", "DIM"),
+                self.paint(fit(f"  {title}"), "WHITE", "BOLD"),
+                self.paint(fit(f"  {subtitle or self.t('choose_hint')}"), "DIM"),
                 "",
             ))
-            for index, (label, description) in enumerate(options):
+            rows = terminal.lines
+            capacity = max(2, rows - len(lines) - len(footer) - 4)
+            start = max(0, min(selected - capacity // 2, len(options) - capacity))
+            for index in range(start, min(len(options), start + capacity)):
+                label, description = options[index]
                 prefix = "  ❯ " if index == selected else "    "
                 if index == selected:
-                    lines.append(self.paint(prefix + label, "GREEN", "BOLD"))
+                    lines.append(self.paint(fit(prefix + label), "GREEN", "BOLD"))
                     if description:
-                        lines.append(self.paint("      " + description, "DIM"))
+                        lines.append(self.paint(fit("      " + description), "DIM"))
                 else:
-                    lines.append(self.paint(prefix + label, "WHITE"))
+                    lines.append(self.paint(fit(prefix + label), "WHITE"))
             if footer:
                 lines.append("")
-                lines.extend(self.paint("  " + line, "DIM") for line in footer)
+                lines.extend(self.paint(fit("  " + line), "DIM") for line in footer)
             self._draw(lines)
             key = self.key_reader()
             if key in {"up", "k"}:

@@ -22,5 +22,7 @@
   "execution_mode": "adaptive",
   "max_parallel_agents": 0,
   "evidence_cache_entries": 128,
-  "browser_quality_gate": true
+  "browser_quality_gate": true,
+  "full_orchestra": false,
+  "stream_output": true
 }

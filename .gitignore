@@ -1,9 +1,25 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
-memory/*.json
-memory/*.txt
-memory/runs/
-.DS_Store
+*.py[cod]
+*.pyo
+.venv/
+venv/
+.env
+.env.*
+
+# Local config / secrets
 config.json
-.modai/
+
+# Runtime / generated data
+workspace/
+memory/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log

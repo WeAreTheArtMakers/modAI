@@ -4,11 +4,11 @@ import hashlib
 import json
 import time
 from typing import Any
+from runtime_context import get_workspace
 
 
 READ_ONLY_TOOLS = {
-    "list_files", "search_files", "read_file", "file_exists", "search_web", "fetch_url",
-    "git_status", "git_diff", "validate_web_assets", "validate_static_site",
+    "read_file", "search_web", "fetch_url",
 }
 WEB_CACHE_TOOLS = {"search_web", "fetch_url"}
 
@@ -23,7 +23,17 @@ class EvidenceCache:
 
     def key(self, tool: str, args: dict[str, Any]) -> str:
         revision = 0 if tool in WEB_CACHE_TOOLS else self.workspace_revision
-        raw = json.dumps([tool, args, revision], ensure_ascii=False, sort_keys=True, default=str)
+        workspace = get_workspace().resolve()
+        fingerprint = ''
+        if tool == 'read_file':
+            path = (workspace / str(args.get('path', ''))).resolve()
+            if path != workspace and workspace not in path.parents:
+                return 'invalid-outside-workspace'
+            try:
+                fingerprint = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                fingerprint = 'missing'
+        raw = json.dumps([tool, args, revision, str(workspace), fingerprint], ensure_ascii=False, sort_keys=True, default=str)
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
     def get(self, tool: str, args: dict[str, Any], ttl_seconds: int = 3600) -> str | None:
@@ -47,11 +57,6 @@ class EvidenceCache:
 
     def mark_workspace_changed(self) -> None:
         self.workspace_revision += 1
-        for key in list(self.data):
-            if isinstance(self.data[key], dict) and key:
-                # Web entries use revision zero and remain reusable; file entries are
-                # naturally unreachable after the revision changes.
-                continue
 
     def export(self) -> dict[str, Any]:
         return {**self.data, "_workspace_revision": self.workspace_revision}

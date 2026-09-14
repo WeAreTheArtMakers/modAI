@@ -1,6 +1,10 @@
 #!/bin/zsh
 set -euo pipefail
 
+# A value of 0 still enables Apple's launch-time logging hook and produces
+# misleading warnings in every Python/Chromium child. Leave it truly unset.
+unset MallocStackLogging MallocStackLoggingNoCompact
+
 invocation_dir="$PWD"
 launcher_name="${0:t}"
 app_dir="${0:A:h}"

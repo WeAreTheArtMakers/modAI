@@ -42,6 +42,8 @@ class Settings:
     max_parallel_agents: int = 0
     evidence_cache_entries: int = 128
     browser_quality_gate: bool = True
+    full_orchestra: bool = False
+    stream_output: bool = True
 
     def validate(self) -> None:
         if not self.model.strip():

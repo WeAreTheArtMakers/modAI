@@ -1,31 +1,35 @@
 from __future__ import annotations
 
 import re
+import json
 from pathlib import Path
 from typing import Any
+from task_context import split_task
 
 
 FILE_PATTERN = re.compile(
-    r"(?<![\w.-])((?:[\w.-]+/)*[\w.-]+\.(?:html?|css|m?js|cjs|jsx|tsx|py|json|md|svg|png|jpe?g|webp|ico|toml|ya?ml))",
+    r"(?<![\w./-])((?:[\w.-]+/)*[\w.-]+\.(?:html?|css|m?js|cjs|jsx|tsx|py|json|md|svg|png|jpe?g|webp|ico|toml|ya?ml))(?![\w-]|\.\w)",
     re.IGNORECASE,
 )
 
 
 def infer_artifact_contract(task: str, plan: dict[str, Any]) -> dict[str, Any]:
     """Build a deterministic completion contract from the prompt and planner output."""
-    task_without_urls = re.sub(r"https?://\S+", "", task)
+    instruction, _reference = split_task(task)
+    task_without_urls = re.sub(r"https?://\S+", "", instruction)
     expected = {match.group(1).lstrip("./") for match in FILE_PATTERN.finditer(task_without_urls)}
     planner_contract = plan.get("artifact_contract")
+    expected = {path for path in expected if path.casefold() not in {'node.js', 'vue.js', 'next.js', 'react.js'}}
     if isinstance(planner_contract, dict):
         for item in planner_contract.get("files", []):
             path = item.get("path") if isinstance(item, dict) else item
-            if isinstance(path, str) and FILE_PATTERN.fullmatch(path.strip().lstrip("./")):
+            if isinstance(path, str) and path in expected and FILE_PATTERN.fullmatch(path):
                 expected.add(path.strip().lstrip("./"))
 
-    folded = task.casefold()
+    folded = instruction.casefold()
     static_site = any(marker in folded for marker in (
         "landing page", "static site", "statik site", "web page", "website",
-        "index.html", "responsive", "frontend",
+        "index.html", "responsive", "frontend", "landpage", "landing", "web sitesi", "web sayfa",
     ))
     if static_site and not any(path.endswith((".html", ".htm")) for path in expected):
         expected.add("index.html")
@@ -79,7 +83,10 @@ def evaluate_artifact_contract(
         latest = next((item for item in reversed(tool_trace) if item.get("tool") == tool_name), None)
         verdict = "MISSING"
         if latest is not None:
-            verdict = "PASS" if latest.get("ok") else "FAIL"
+            try:
+                verdict = "PASS" if latest.get("ok") and json.loads(latest.get("result", "{}" )).get("verdict") == "PASS" else "FAIL"
+            except (ValueError, TypeError):
+                verdict = "FAIL"
         checks.append({"tool": tool_name, "status": verdict})
 
     commands: list[dict[str, Any]] = []
@@ -87,7 +94,8 @@ def evaluate_artifact_contract(
         expected = item.get("command", [])
         latest = next((trace for trace in reversed(tool_trace)
                        if trace.get("tool") == "run_terminal" and trace.get("args", {}).get("command") == expected), None)
-        commands.append({"command": expected, "status": "PASS" if latest and latest.get("ok") else "MISSING"})
+        passed = latest and latest.get("ok") and str(latest.get("result", "")).startswith("exit_code=0\n")
+        commands.append({"command": expected, "status": "PASS" if passed else "MISSING"})
 
     failed = any(item["status"] != "PASS" for item in files + checks + commands)
     return {

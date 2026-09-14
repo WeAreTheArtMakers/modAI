@@ -718,7 +718,7 @@ class DashboardTests(unittest.TestCase):
         output = StringIO()
         with redirect_stdout(output):
             Dashboard._draw(["first", "second"])
-        self.assertEqual(output.getvalue(), "\033[2J\033[Hfirst\r\nsecond\r\n")
+        self.assertEqual(output.getvalue(), "\033[H\033[Jfirst\r\nsecond\r\n")
 
     def test_task_editor_inserts_at_cursor_without_deleting(self) -> None:
         events = iter([
@@ -776,9 +776,11 @@ class ResumeTests(unittest.TestCase):
         }
         agent = Orchestrator(Settings(), client=object())
         agent._migrate_resume_plan(state)
-        self.assertEqual([task["role"] for task in state["plan"]["tasks"]], ["researcher", "coder"])
-        self.assertEqual(state["task_cursor"], 1)
-        self.assertEqual(state["version"], "4.0.0")
+        self.assertEqual([task["role"] for task in state["plan"]["tasks"]], ["coder"])
+        self.assertEqual(state["task_cursor"], 0)
+        self.assertEqual(state['phase'], 'execute')
+        self.assertEqual(state["version"], "4.1.0")
+        self.assertEqual(len(state['migration_history']), 1)
 
     def test_resume_allows_legacy_local_run_above_old_token_budget(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

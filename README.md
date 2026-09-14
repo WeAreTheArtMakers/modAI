@@ -37,8 +37,9 @@ The default path is entirely local. Public research packages can optionally use 
 OpenAI, Anthropic, or Google API model, but only after explicit per-task consent.
 Potential secrets remain on the local route.
 
-> Current release: **4.0.0** — artifact contracts, Chromium quality gates, shared
-> evidence, adaptive read-only parallelism, smart stopping, and live score telemetry.
+> Current release: **4.1.0 — Less rehearsal. More working software.**
+> Simple software tasks go straight to implementation, then machine checks and
+> independent review. Long reference documents no longer become accidental work orders.
 
 ## Why MODAI
 
@@ -141,6 +142,27 @@ MODAI_BASE_MODEL=qwen3.5:4b ./setup.sh
 
 Reinstall only the global command with `./install-command.sh`.
 
+### Update an existing installation
+
+Stop an active task with `Ctrl+C` in **its own terminal** so it checkpoints first.
+Already-running Python processes do not hot-reload new orchestration code.
+
+```bash
+cd /path/to/modAI
+git pull --ff-only
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m playwright install chromium
+.venv/bin/python -m unittest discover -s tests
+./install-command.sh
+modai --version
+cd /path/to/your/project
+modai --resume RUN_ID
+```
+
+This update does not require downloading or rebuilding your model. Legacy simple
+software runs are migrated to a direct implementation plan; their previous plans
+and outputs remain in `migration_history`, and existing project files are preserved.
+
 ## First run
 
 Run `modai` without a task to open the arrow-key Command Center.
@@ -191,6 +213,12 @@ The task editor supports cursor movement without deleting the prompt:
 - bracketed multiline paste with a localized “Pasted text” counter
 - `Enter`: submit
 - `Esc`: cancel
+
+Menus use the terminal's alternate screen and return to the existing output buffer
+when work begins; they do not push a screenful of empty rows into task history.
+During inference, press **`d`** to expand/collapse recent tool paths and queries.
+Use **`--verbose`** to start with details expanded. The one-line activity indicator
+shows elapsed time and streamed response activity, not hidden model reasoning.
 
 ## Model and runtime parameters
 
@@ -352,6 +380,14 @@ modai --read-only "Audit this repository and report risks"
 # Fast local execution
 modai --profile fast "Fix the mobile navigation bug and test it"
 
+# Simple software tasks skip planner inference and debate automatically.
+# Opt back into the full configured ensemble when deliberation is useful:
+modai --full-orchestra --profile deep "Review the architecture and repair the application"
+
+# Expanded tool details / read-only run diagnostics (no model call)
+modai --verbose "Build a responsive landing page in index.html"
+modai --inspect-run RUN_ID
+
 # Deeper local execution — still no token ceiling
 modai --profile deep --repair-rounds 4 \
   "Repair the landing page and keep working until all quality gates pass"
@@ -380,6 +416,9 @@ modai --recommend-model
 | `--workspace PATH` | Workspace; defaults to the invocation directory |
 | `--model MODEL` | Local Ollama model for this invocation |
 | `--profile fast\|balanced\|deep\|marathon` | Orchestration preset |
+| `--full-orchestra` | Disable automatic direct-build routing; use configured planning/debate |
+| `--verbose` | Show tool paths/queries; toggle during inference with `d` |
+| `--inspect-run RUN_ID` | Inspect saved phase, gates, recent tools and request metrics without inference |
 | `--max-agents N` | Logical agent-step capacity, 1–256 |
 | `--debate-rounds N` | Adversarial debate rounds, 0–20 |
 | `--repair-rounds N` | Failed-gate repair rounds, 0–20 |
@@ -469,12 +508,17 @@ variables override the file.
   "execution_mode": "adaptive",
   "max_parallel_agents": 0,
   "evidence_cache_entries": 128,
-  "browser_quality_gate": true
+  "browser_quality_gate": true,
+  "full_orchestra": false,
+  "stream_output": true
 }
 ```
 
 The stored `max_total_tokens` key is retained for compatibility; since 3.5 it means
 **cloud token budget**, never a local-run ceiling.
+`full_orchestra` disables automatic direct-build routing. `stream_output=false`
+uses non-streaming Ollama calls for backends with incompatible streaming support;
+the elapsed-time indicator remains available.
 
 | Environment variable | Setting |
 |---|---|
@@ -508,23 +552,32 @@ The Ollama host is intentionally restricted to localhost.
 
 ## How a run completes
 
-1. The Orchestra Conductor turns the prompt into a bounded dependency score and an
-   artifact contract: expected files, explicit test commands, machine checks, and
-   research evidence requirements.
-2. Simple software work is consolidated into one Code Virtuoso part; quality roles
-   remain independent and cannot be consumed by the planner.
-3. Dependency-ready specialists work with role-scoped tools. Shared file/URL evidence
-   is reused by content hash and workspace revision instead of reread into context.
-4. If an agent repeats tools without producing new evidence for two rounds, the
+1. The Conductor chooses a route. Short software instructions receive a deterministic
+   direct-build plan, with **zero planner model requests**. Complex work still receives
+   a model-generated dependency score. `--full-orchestra` overrides automatic routing.
+2. A long pasted Markdown reference following the user's instruction is separated
+   from that instruction. Only requested filenames become contract items: a product
+   README mentioning `Node.js` or `orchestrator.py` is not a request to create them.
+   The complete original text remains available through `read_task_reference`.
+3. Code Virtuoso must make a successful file edit before an implementation step can
+   complete. Direct work uses compact prompts, a context ceiling of 8192, temperature
+   at most 0.3, and reasoning mode off, without changing saved model preferences.
+   `--full-orchestra` uses the configured model preferences instead.
+4. Shared file/URL evidence avoids redundant I/O. File reads are keyed by actual
+   content hash, so external edits invalidate them. Repeated evidence within a part
+   becomes a short reuse note; fresh excerpts still cost input tokens. Old tool
+   exchanges are bounded while preserving complete tool-call/result transactions.
+5. If an agent repeats tools without producing new evidence for two rounds, the
    Conductor stops that part and hands its evidence to the Lead Arranger.
-5. Counterpoint debate runs only as configured, followed by reviewer, tester,
-   security, and research gates relevant to the work.
-6. Static sites pass both deterministic source checks and a real local Chromium
+   A writer with no real edit fails explicitly instead of claiming completion.
+6. Direct static-site work skips debate and runs machine checks **before** spending
+   tokens on reviewer, tester and security roles. Concrete failures go straight to
+   repair. Complex work retains configured debate and relevant verification roles.
+7. Static sites pass both deterministic source checks and a real local Chromium
    render at mobile, landscape, tablet, and desktop sizes.
-7. A failed or missing contract item triggers repair and revalidation. A model-written
-   `PASS` can never override a machine `FAIL`.
-8. Final synthesis begins only after the current artifact, research, and quality
-   states have been checkpointed.
+8. Missing artifacts, nonzero command exit codes and machine `FAIL` results block
+   completion. The latest independent verdict must explicitly say `VERDICT: PASS`.
+   Direct runs summarize recorded results without an extra finalizer model request.
 
 `validate_static_site` checks referenced assets, viewport metadata, title, duplicate
 IDs, image alt text, CSS brace balance, and JavaScript syntax through local Node.js.
@@ -550,7 +603,7 @@ modai --resume                 # latest unfinished run
 modai --resume RUN_ID          # a specific run
 ```
 
-Runs paused by the old all-token budget can be resumed normally in 4.0. Historical
+Runs paused by the old all-token budget can be resumed normally in 4.1. Historical
 local token use no longer blocks startup.
 
 ## Security boundaries
@@ -597,6 +650,9 @@ The live score keeps progress readable without streaming every internal thought:
 `EFF` is verified contract items plus passed quality gates per 10,000 tokens. The run
 state also records per-agent input/output usage, changed-file count, and cache hits.
 Repeated identical terminal tool events collapse into a single `×N` line.
+Per-request diagnostics record input/output tokens, elapsed seconds, message bytes,
+effective context and reasoning setting. Inspect them with `modai --inspect-run RUN_ID`.
+These measurements distinguish orchestration overhead from a slow model server.
 
 ## Troubleshooting
 
@@ -613,12 +669,21 @@ Do not raise `--max-total-tokens` for local work; it now concerns cloud only.
 
 ### Token use grows rapidly on a simple task
 
-- Start a fresh 4.0 run so contracts, caching, and smart stopping are applied.
-- Prefer `fast` or `balanced` unless debate is genuinely useful.
-- Keep `num_ctx` at 8192 on a 16 GB M1 Pro.
+- Restart with 4.1 and resume the checkpoint; an old running process still uses old code.
+- Direct routing is automatic for simple software work, regardless of debate preset.
+- Inspect the artifact contract. Documentation filenames must not become deliverables.
+- Use `--inspect-run RUN_ID` to compare request size, duration and actual writes.
 - Put concrete files and acceptance criteria in one prompt.
 - Do not combine broad market research with a small CSS fix.
-- Inspect `/runs` before increasing retries.
+- Increasing agent count or token allowance does not make a stalled writer productive.
+
+### Small requests are still slow after updating
+
+Check `ollama ps` and the run's request metrics. MODAI can bound the request it sends,
+but a custom model/backend may keep a larger resident context or substantial memory.
+Several open MODAI terminals can also submit requests to the same Ollama server;
+the in-run sequential scheduler is not a cross-process lock. Keep one active task
+while measuring. A spinner is activity feedback, not evidence of an artifact.
 
 ### Model not found or Ollama unavailable
 
@@ -655,12 +720,27 @@ python -m unittest discover -s tests -v
 python -m py_compile orchestrator.py config.py contracts.py evidence_cache.py roles.py tui.py tools/browser_gate.py
 ```
 
-The 68-test suite covers terminal navigation, prompt editing and paste safety,
+The regression suite covers terminal navigation, prompt editing and paste safety,
 workspace confinement, command validation, model advice, tool protocols, cloud
 routing, unlimited local-token semantics, cloud-budget extension, checkpoint resume,
 artifact contracts, evidence-cache invalidation, smart stopping, live score fields,
 valid and deliberately broken static applications, four real browser viewports, and
 machine-over-model quality-gate behavior.
+
+Productivity regressions exercise long pasted READMEs, filename parsing, external
+cache invalidation, bounded tool conversations, direct write-before-review order,
+stream assembly and alternate-screen restoration. Tests with scripted model clients
+verify control flow; they are not proof of real-model speed or design quality.
+
+Run an opt-in **real local-model** benchmark in a new temporary workspace:
+
+```bash
+.venv/bin/python tests/benchmark_local.py --model YOUR_INSTALLED_MODEL
+```
+
+It records time to first file write, total duration, token usage and actual machine
+gates. It never uses paid providers or writes into an existing project. Run it when
+your other model tasks are idle; results depend on the selected model and backend.
 
 ## Current limitations
 
@@ -683,6 +763,12 @@ machine-over-model quality-gate behavior.
    allowing prompt files to broaden tool permissions.
 4. **Visual regression baselines:** optional pixel-diff history on top of the current
    structural browser gate.
+5. **Cross-process inference coordination:** make competing terminal sessions visible
+   and queue them fairly instead of silently overloading one local model server.
+6. **Task-specific browser acceptance:** test real user journeys (menu, form, theme,
+   keyboard navigation), not only generic page structure and absence of errors.
+7. **Model qualification benchmarks:** compare first-write latency, repair success
+   and verified artifacts per minute before recommending a custom local model.
 
 ## License
 

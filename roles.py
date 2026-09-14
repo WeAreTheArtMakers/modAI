@@ -11,7 +11,7 @@ class RoleSpec:
     output_contract: str
 
 
-READ = ("list_files", "search_files", "read_file", "file_exists")
+READ = ("list_files", "search_files", "read_file", "file_exists", "read_task_reference")
 WEB = READ + ("search_web", "fetch_url")
 WRITE = READ + ("write_file", "replace_in_file", "make_directory")
 CODE = WRITE + ("run_terminal", "git_status", "git_diff", "validate_web_assets", "validate_static_site", "validate_browser_quality")
