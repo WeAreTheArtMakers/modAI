@@ -37,9 +37,20 @@ The default path is entirely local. Public research packages can optionally use 
 OpenAI, Anthropic, or Google API model, but only after explicit per-task consent.
 Potential secrets remain on the local route.
 
-> Current release: **4.1.0 — Less rehearsal. More working software.**
+> Current release: **4.2.0 — Less rehearsal. More working software.**
 > Simple software tasks go straight to implementation, then machine checks and
-> independent review. Long reference documents no longer become accidental work orders.
+> one evidence-based review. Vision-capable local models also inspect the actual
+> desktop/mobile screenshots. Long reference documents no longer become work orders.
+
+```text
+Simple website → Code Virtuoso → deterministic browser checks → local visual/source review
+                                      ↑                              │
+                                      └── concrete blocking repair ──┘
+```
+
+More roles do not mean more independent minds: local specialists share one model.
+For a simple static page, the browser is the tester; security review is added when
+forms, credentials, storage, API calls or third-party scripts are detected.
 
 ## Why MODAI
 
@@ -55,8 +66,9 @@ Potential secrets remain on the local route.
   tools.
 - **Real tools, real evidence:** agents inspect files, apply changes, run allowlisted
   commands, validate complete static applications, review diffs, and checkpoint results.
-- **Quality gates:** software work is not marked complete while reviewer, tester, or
-  security gates still report `VERDICT: FAIL`.
+- **Evidence-based completion:** required artifacts must exist and direct-build
+  artifacts must differ from their baseline. Current machine errors and concrete
+  review findings block completion; warnings and personal taste do not.
 - **Long-running work:** every meaningful step is written to a run directory and can
   be resumed after interruption.
 - **Keyboard-native TUI:** arrow-key menus, a cursor-aware prompt editor, bracketed
@@ -162,6 +174,13 @@ modai --resume RUN_ID
 This update does not require downloading or rebuilding your model. Legacy simple
 software runs are migrated to a direct implementation plan; their previous plans
 and outputs remain in `migration_history`, and existing project files are preserved.
+New runs record whether write permission was inferred or explicitly selected. Only
+known inferred permissions are recalculated on resume. Unknown legacy read-only
+permissions stay read-only until you explicitly authorize a change:
+
+```bash
+modai --resume RUN_ID --allow-write
+```
 
 ## First run
 
@@ -432,6 +451,8 @@ modai --recommend-model
 | `--max-total-tokens N` | Compatibility alias for `--cloud-token-budget` |
 | `--allow-cloud` | Permit eligible public packages to use configured cloud API |
 | `--read-only` | Remove all file-write tools |
+| `--allow-write` | Explicitly authorize edits, including for a legacy read-only resumed run |
+| `--no-visual-review` | Skip model screenshot review; deterministic browser checks remain enabled |
 | `--no-internet` | Remove web search/fetch tools |
 | `--language tr\|en` | Interface language |
 | `--resume [RUN_ID]` | Resume the selected/latest unfinished run |
@@ -510,7 +531,8 @@ variables override the file.
   "evidence_cache_entries": 128,
   "browser_quality_gate": true,
   "full_orchestra": false,
-  "stream_output": true
+  "stream_output": true,
+  "visual_review": true
 }
 ```
 
@@ -519,6 +541,9 @@ The stored `max_total_tokens` key is retained for compatibility; since 3.5 it me
 `full_orchestra` disables automatic direct-build routing. `stream_output=false`
 uses non-streaming Ollama calls for backends with incompatible streaming support;
 the elapsed-time indicator remains available.
+`visual_review` enables local screenshot review when the selected model reports
+vision support. Unsupported models receive source review, and the checkpoint clearly
+records that visual review was unavailable; it does not pretend images were assessed.
 
 | Environment variable | Setting |
 |---|---|
@@ -567,17 +592,23 @@ The Ollama host is intentionally restricted to localhost.
    content hash, so external edits invalidate them. Repeated evidence within a part
    becomes a short reuse note; fresh excerpts still cost input tokens. Old tool
    exchanges are bounded while preserving complete tool-call/result transactions.
+   Large completed writes are summarized with their actual success result, so
+   dropping a code payload cannot make the model forget it already wrote the file.
 5. If an agent repeats tools without producing new evidence for two rounds, the
    Conductor stops that part and hands its evidence to the Lead Arranger.
    A writer with no real edit fails explicitly instead of claiming completion.
 6. Direct static-site work skips debate and runs machine checks **before** spending
-   tokens on reviewer, tester and security roles. Concrete failures go straight to
-   repair. Complex work retains configured debate and relevant verification roles.
+   tokens on one structured reviewer. There is no duplicate model tester for a simple
+   static page. Security-sensitive features add a security reviewer. Complex work
+   retains configured debate and relevant verification roles.
 7. Static sites pass both deterministic source checks and a real local Chromium
    render at mobile, landscape, tablet, and desktop sizes.
-8. Missing artifacts, nonzero command exit codes and machine `FAIL` results block
-   completion. The latest independent verdict must explicitly say `VERDICT: PASS`.
-   Direct runs summarize recorded results without an extra finalizer model request.
+8. SHA-256 baselines distinguish existing files from new implementation. Missing or
+   unchanged requested artifacts, nonzero exit codes and current machine errors
+   block completion. A direct reviewer returns structured `blocking_issues`, each
+   with a file, current evidence and repair action. An empty list never schedules
+   arbitrary code edits. Malformed review output remains unresolved, not silently
+   passed. Direct runs summarize evidence without an extra finalizer model request.
 
 `validate_static_site` checks referenced assets, viewport metadata, title, duplicate
 IDs, image alt text, CSS brace balance, and JavaScript syntax through local Node.js.
@@ -585,6 +616,18 @@ IDs, image alt text, CSS brace balance, and JavaScript syntax through local Node
 screenshots under `.modai/browser/`, and rejects horizontal overflow, JavaScript or
 console errors, broken in-page navigation, failed HTTP navigation, and pages with no
 visible content.
+It also exercises explicitly identified navigation-menu buttons when navigation
+links are hidden, catching the common "mobile hamburger with no click handler" bug.
+
+**A browser PASS is not a beauty score.** Screenshots plus structural/runtime tests
+do not prove good design. When vision is supported, the same local model receives
+desktop and mobile images for hierarchy, readability, spacing and visible requirement
+review. Numeric scores and taste are advisory; only concrete defects block. Images
+are never routed to the cloud by this feature.
+
+Machine warnings (for example a missing optional `<main>` landmark) stay advisory
+unless the user explicitly required that feature. Original error quotations are
+historical reports; only current source/browser evidence can establish a live defect.
 
 ## Checkpoints and recovery
 
@@ -603,8 +646,10 @@ modai --resume                 # latest unfinished run
 modai --resume RUN_ID          # a specific run
 ```
 
-Runs paused by the old all-token budget can be resumed normally in 4.1. Historical
+Runs paused by the old all-token budget can be resumed normally in 4.2. Historical
 local token use no longer blocks startup.
+When a legacy run has no artifact baseline, the new baseline is captured at resume;
+the engine cannot reconstruct file contents from the original run start retroactively.
 
 ## Security boundaries
 
@@ -650,8 +695,9 @@ The live score keeps progress readable without streaming every internal thought:
 `EFF` is verified contract items plus passed quality gates per 10,000 tokens. The run
 state also records per-agent input/output usage, changed-file count, and cache hits.
 Repeated identical terminal tool events collapse into a single `×N` line.
-Per-request diagnostics record input/output tokens, elapsed seconds, message bytes,
-effective context and reasoning setting. Inspect them with `modai --inspect-run RUN_ID`.
+Per-request diagnostics record input/output tokens, elapsed seconds, first-response
+latency, provider-reported prompt/generation time, message bytes, effective context
+and reasoning setting. Inspect them with `modai --inspect-run RUN_ID`.
 These measurements distinguish orchestration overhead from a slow model server.
 
 ## Troubleshooting
@@ -669,7 +715,7 @@ Do not raise `--max-total-tokens` for local work; it now concerns cloud only.
 
 ### Token use grows rapidly on a simple task
 
-- Restart with 4.1 and resume the checkpoint; an old running process still uses old code.
+- Restart with 4.2 and resume the checkpoint; an old running process still uses old code.
 - Direct routing is automatic for simple software work, regardless of debate preset.
 - Inspect the artifact contract. Documentation filenames must not become deliverables.
 - Use `--inspect-run RUN_ID` to compare request size, duration and actual writes.
@@ -736,11 +782,35 @@ Run an opt-in **real local-model** benchmark in a new temporary workspace:
 
 ```bash
 .venv/bin/python tests/benchmark_local.py --model YOUR_INSTALLED_MODEL
+.venv/bin/python tests/benchmark_local.py --model YOUR_INSTALLED_MODEL \
+  --task "Create a compact responsive index.html with inline CSS, a main heading and three cards."
 ```
 
 It records time to first file write, total duration, token usage and actual machine
 gates. It never uses paid providers or writes into an existing project. Run it when
 your other model tasks are idle; results depend on the selected model and backend.
+
+### Measured smoke test (4.2)
+
+On the development M1 Pro / 16 GB machine, `mod-agent:latest` (Qwen3.5 9B,
+GGUF Q4_K_M) completed a compact, single-file, responsive three-card page with
+local screenshot review enabled:
+
+| Measurement | Observed result |
+|---|---:|
+| First real file write | 54.0 s |
+| End-to-end completion | 84.8 s |
+| Model requests | 3 |
+| Input / output tokens | 4,930 / 752 |
+| Total local / cloud tokens | 5,682 / 0 |
+| Changed artifact + static checks + four browser viewports | PASS |
+| Local desktop/mobile image review | PASS (model judgment) |
+
+This is one narrowly scoped smoke test, not a general speed or design-quality
+guarantee. The model judged screenshots; the browser independently checked runtime
+behavior. The test does not certify product claims, content accuracy or every user
+journey. The deterministic regression suite separately exercises deliberately broken
+menus, stale evidence, unchanged files, permission migration and malformed reviews.
 
 ## Current limitations
 
@@ -749,6 +819,11 @@ your other model tasks are idle; results depend on the selected model and backen
 - Hybrid providers use API keys, not consumer-subscription login.
 - Cloud packages do not receive local tools or project files by design.
 - Token counts are telemetry, not a currency estimate.
+- Direct routing and security-feature detection are heuristics, not full semantic
+  analysis. A source-only reviewer cannot judge screenshots; vision review remains
+  model judgment rather than a guarantee of aesthetic quality.
+- There is no mandatory local token/request cost cap. No-progress checks, bounded
+  context and configured retry/repair limits control repetition instead.
 - `max_hours` remains a separate active-time guard.
 - Human review remains appropriate for production, legal, financial, and
   security-critical decisions.

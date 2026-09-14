@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,6 +22,27 @@ VIEWPORTS = {
 class _QuietHandler(SimpleHTTPRequestHandler):
     def log_message(self, _format: str, *args: Any) -> None:
         return
+
+
+def _probe_navigation_toggle(page: Any) -> list[str]:
+    """Exercise an explicitly named menu toggle only when it hides nav links."""
+    links = page.locator('nav a, [role="navigation"] a')
+    hidden = [link for link in links.all()[:40] if not link.is_visible()]
+    if not hidden:
+        return []
+    for button in page.locator('nav button, [role="navigation"] button').all()[:8]:
+        label = (button.get_attribute('aria-label') or '') + ' ' + button.inner_text() + ' ' + (button.get_attribute('class') or '')
+        if not button.is_visible() or not re.search(r'menu|menü|navigation', label, re.I):
+            continue
+        try:
+            button.click(timeout=1500)
+            # Wait for real visibility, accommodating CSS/JS transitions.
+            from playwright.sync_api import expect
+            expect(hidden[0]).to_be_visible(timeout=1500)
+            return []
+        except Exception:
+            return ['navigation menu toggle does not reveal hidden links']
+    return []
 
 
 def validate_browser_quality(path: str = ".") -> str:
@@ -97,10 +119,11 @@ def validate_browser_quality(path: str = ".") -> str:
                             link_response = context.request.get(urljoin(url, href), timeout=5000)
                             if not link_response.ok:
                                 errors.append(f"broken local navigation: {href} ({link_response.status})")
-                    errors.extend(f"console: {item}" for item in console_errors)
-                    errors.extend(f"javascript: {item}" for item in runtime_errors)
                     screenshot = output / f"{name}.png"
                     page.screenshot(path=str(screenshot), full_page=True)
+                    errors.extend(_probe_navigation_toggle(page))
+                    errors.extend(f"console: {item}" for item in console_errors)
+                    errors.extend(f"javascript: {item}" for item in runtime_errors)
                     reports.append({
                         "name": name, "width": width, "height": height,
                         "status": "PASS" if not errors else "FAIL", "errors": errors,

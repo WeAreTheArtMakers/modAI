@@ -134,7 +134,7 @@ class ProductivityTests(unittest.TestCase):
                         '<meta name="viewport" content="width=device-width,initial-scale=1"><title>MODAI</title>'
                         '</head><body><main><h1>One model, many agents</h1></main></body></html>'},
                     }}]}}
-                return {'message': {'content': 'VERDICT: PASS\nEvidence: page verified.', 'tool_calls': []}}
+                return {'message': {'content': '{"blocking_issues":[],"advisory":[]}', 'tool_calls': []}}
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -144,7 +144,7 @@ class ProductivityTests(unittest.TestCase):
                 agent.run_task('Build a responsive MODAI landing page')
             state = json.loads(next((root / 'runs').glob('*/state.json')).read_text())
             self.assertEqual(state['status'], 'completed')
-            self.assertEqual([item['role'] for item in state['outputs']], ['coder', 'reviewer', 'tester', 'security_reviewer'])
+            self.assertEqual([item['role'] for item in state['outputs']], ['coder', 'reviewer'])
             self.assertEqual(state['tool_trace'][0]['tool'], 'write_file')
             self.assertTrue(all(call['think'] is False for call in client.calls))
             self.assertLessEqual(len(client.calls), 8)

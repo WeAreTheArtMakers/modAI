@@ -60,6 +60,22 @@ def bounded_messages(messages: list[dict[str, Any]], context: int, output: int,
         size = len(json.dumps(group, ensure_ascii=False).encode())
         if size > remaining:
             if not selected:
+                if any(item.get('tool_calls') for item in group):
+                    # A large write payload must not erase the evidence that the
+                    # write happened. Summarize the WHOLE completed exchange,
+                    # instead of leaving orphan tool results or resending code.
+                    actions = []
+                    for item in group:
+                        for call in item.get('tool_calls', []):
+                            function = call.get('function', {})
+                            args = function.get('arguments', {})
+                            actions.append({'tool': function.get('name'),
+                                            'path': args.get('path') if isinstance(args, dict) else None})
+                    results = [clip(str(item.get('content', '')), 350) for item in group if item.get('role') == 'tool']
+                    summary = ('Completed tool exchange (large arguments omitted; actual files are on disk). '
+                               'Do not repeat successful writes. Actions: ' + json.dumps(actions, ensure_ascii=False)
+                               + '\nResults: ' + '\n'.join(results))
+                    group = [{'role': 'assistant', 'content': clip(summary, max(120, remaining-80))}]
                 # Compact only results/prose, never truncate tool argument JSON.
                 for item in group:
                     if not item.get('tool_calls'):

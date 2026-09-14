@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import json
+import hashlib
 from pathlib import Path
 from typing import Any
 from task_context import split_task
@@ -66,8 +67,19 @@ def _normalize_commands(contract: Any) -> list[dict[str, Any]]:
     return commands
 
 
+def artifact_fingerprints(contract: dict[str, Any], workspace: Path) -> dict[str, str | None]:
+    result: dict[str, str | None] = {}
+    for item in contract.get('files', []):
+        name = str(item.get('path', ''))
+        path = (workspace / name).resolve()
+        safe = workspace.resolve() in path.parents
+        result[name] = hashlib.sha256(path.read_bytes()).hexdigest() if safe and path.is_file() else None
+    return result
+
+
 def evaluate_artifact_contract(
     contract: dict[str, Any], workspace: Path, tool_trace: list[dict[str, Any]],
+    baseline: dict[str, str | None] | None = None, require_change: bool = False,
 ) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
     for item in contract.get("files", []):
@@ -76,7 +88,10 @@ def evaluate_artifact_contract(
         safe = target == workspace.resolve() or workspace.resolve() in target.parents
         exists = safe and target.is_file()
         nonempty = exists and target.stat().st_size > 0
-        files.append({"path": relative, "status": "PASS" if nonempty else "FAIL"})
+        changed = (hashlib.sha256(target.read_bytes()).hexdigest() != baseline.get(relative)) if nonempty and baseline is not None else None
+        passed = nonempty and (not require_change or changed is True)
+        files.append({"path": relative, "status": "PASS" if passed else "FAIL",
+                      'changed': changed, 'reason': 'unchanged artifact' if nonempty and not passed else ''})
 
     checks: list[dict[str, Any]] = []
     for tool_name in contract.get("checks", []):

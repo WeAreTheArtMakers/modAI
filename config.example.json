@@ -24,5 +24,6 @@
   "evidence_cache_entries": 128,
   "browser_quality_gate": true,
   "full_orchestra": false,
-  "stream_output": true
+  "stream_output": true,
+  "visual_review": true
 }

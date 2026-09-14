@@ -21,6 +21,8 @@ from orchestrator import Orchestrator
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument('--model', required=True)
+    parser.add_argument('--task', default='Create index.html: a polished MODAI landing page with inline CSS, a navigation link to #features, a hero heading and three feature cards. Make it mobile responsive. Write the actual file and test it.')
+    parser.add_argument('--no-visual-review', action='store_true')
     args = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix='modai-live-benchmark-'))
     print(f'Benchmark workspace: {root}', flush=True)
@@ -36,11 +38,11 @@ def main() -> None:
 
     agent = Orchestrator(Settings(workspace=str(root), model=args.model, language='en',
                                   debate_rounds=0, repair_rounds=1, max_agents=12,
-                                  agent_retries=0, internet_enabled=False), event=event)
+                                  agent_retries=0, internet_enabled=False,
+                                  visual_review=not args.no_visual_review), event=event)
     try:
         with patch('orchestrator.RUNS', root / 'runs'):
-            agent.run_task('Create index.html: a polished MODAI landing page with inline CSS, a navigation link to #features, '
-                           'a hero heading and three feature cards. Make it mobile responsive. Write the actual file and test it.')
+            agent.run_task(args.task)
     except KeyboardInterrupt:
         print('Benchmark interrupted; reporting checkpoint instead of claiming completion.', flush=True)
     state = json.loads(next((root / 'runs').glob('*/state.json')).read_text())

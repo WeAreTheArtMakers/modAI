@@ -44,6 +44,7 @@ class Settings:
     browser_quality_gate: bool = True
     full_orchestra: bool = False
     stream_output: bool = True
+    visual_review: bool = True
 
     def validate(self) -> None:
         if not self.model.strip():
