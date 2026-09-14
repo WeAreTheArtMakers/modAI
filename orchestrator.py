@@ -1365,12 +1365,24 @@ uygun testleri çalıştır ve hangi bulgunun nasıl çözüldüğünü kanıtla
             str(item.get("output", "")) for item in state.get("outputs", [])
             if item.get("role") in {"market_researcher", "customer_researcher", "competitor_analyst", "researcher", "fact_checker", "legal_risk"}
         )
+        research_lines = research_text.splitlines()
         claims = [
             re.sub(r"\W+", " ", line.casefold()).strip()
-            for line in research_text.splitlines()
+            for line in research_lines
             if len(line.strip()) >= 50 and not line.lstrip().startswith(("http://", "https://"))
         ]
         duplicate_claims = len(claims) - len(set(claims))
+        verifiable = re.compile(
+            r"(?:\d|%|according|reports?|market|price|revenue|released|founded|"
+            r"million|billion|milyon|milyar|pazar|fiyat|gelir|yayınlandı)", re.I,
+        )
+        uncited_claims: list[str] = []
+        for index, line in enumerate(research_lines):
+            if len(line.strip()) < 40 or not verifiable.search(line):
+                continue
+            nearby = line + " " + (research_lines[index + 1] if index + 1 < len(research_lines) else "")
+            if not pattern.search(nearby):
+                uncited_claims.append(line.strip()[:240])
         has_dates = bool(re.search(r"\b(?:19|20)\d{2}(?:-\d{2}-\d{2})?\b", research_text))
         has_confidence = bool(re.search(r"\b(?:güven|confidence|yüksek|orta|düşük|high|medium|low)\b", research_text, re.I))
         unique = set(urls) | fetched
@@ -1384,12 +1396,14 @@ uygun testleri çalıştır ve hangi bulgunun nasıl çözüldüğünü kanıtla
             and (not policy.get("primary_source_required") or bool(primary))
             and (not policy.get("dates_required") or has_dates)
             and (not policy.get("confidence_required") or has_confidence)
+            and (not policy.get("url_per_external_claim") or not uncited_claims)
         )
         return {
             "verdict": "PASS" if passed else "FAIL", "sources": len(unique),
             "primary_sources": len(primary), "duplicate_urls": max(0, len(urls) - len(set(urls))),
             "duplicate_claims": duplicate_claims, "dates_present": has_dates,
             "confidence_present": has_confidence,
+            "uncited_external_claims": uncited_claims[:20],
             "policy": policy,
         }
 

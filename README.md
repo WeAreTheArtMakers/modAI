@@ -655,7 +655,7 @@ python -m unittest discover -s tests -v
 python -m py_compile orchestrator.py config.py contracts.py evidence_cache.py roles.py tui.py tools/browser_gate.py
 ```
 
-The 67-test suite covers terminal navigation, prompt editing and paste safety,
+The 68-test suite covers terminal navigation, prompt editing and paste safety,
 workspace confinement, command validation, model advice, tool protocols, cloud
 routing, unlimited local-token semantics, cloud-budget extension, checkpoint resume,
 artifact contracts, evidence-cache invalidation, smart stopping, live score fields,

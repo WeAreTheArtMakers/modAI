@@ -509,6 +509,22 @@ class WorkspaceTests(unittest.TestCase):
         score = agent._score_text(state, "Code Virtuoso", "Test Percussionist")
         for label in ("SCORE", "NOW", "NEXT", "GATES", "TOKENS", "FILES", "EFF"):
             self.assertIn(label, score)
+
+    def test_research_policy_rejects_uncited_external_claim(self) -> None:
+        agent = Orchestrator(Settings(), client=object())
+        state = {
+            "artifact_contract": {"research": {
+                "required": True, "minimum_sources": 1, "primary_source_required": True,
+                "url_per_external_claim": True, "dates_required": True, "confidence_required": True,
+            }},
+            "outputs": [{
+                "role": "market_researcher",
+                "output": "Confidence: high. In 2026 the market reached 10 billion units without any cited evidence.",
+            }],
+        }
+        status = agent._research_evidence_status(state)
+        self.assertEqual(status["verdict"], "FAIL")
+        self.assertEqual(len(status["uncited_external_claims"]), 1)
     def test_complete_static_landing_page_passes_machine_smoke_gate(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
