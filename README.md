@@ -1,122 +1,37 @@
-# MODAI
-
-### One local model. A full specialist orchestra. Your files stay on your machine.
-
-MODAI is a terminal-first, local-first multi-agent orchestrator for founders, small
-teams, researchers, and software builders. A single Ollama model is reused as a
-coordinated ensemble of specialists: the **Orchestra Conductor** writes the score,
-specialists perform focused parts, the **Counterpoint Critic** challenges weak
-assumptions, the **Lead Arranger** resolves conflicts, and independent quality gates
-decide whether the work is actually finished.
+# MODAI — Local Coding & Agent Harness
 
 ```text
-  ███╗   ███╗ ██████╗ ██████╗   █████╗ ██╗
-  ████╗ ████║██╔═══██╗██╔══██╗ ██╔══██╗██║
-  ██╔████╔██║██║   ██║██║  ██║ ███████║██║
-  ██║╚██╔╝██║██║   ██║██║  ██║ ██╔══██║██║
-  ██║ ╚═╝ ██║╚██████╔╝██████╔╝ ██║  ██║██║
-  ╚═╝     ╚═╝ ╚═════╝ ╚═════╝  ╚═╝  ╚═╝╚═╝
-  LOCAL AGENT ORCHESTRATION
+███╗   ███╗ ██████╗ ██████╗  █████╗ ██╗
+████╗ ████║██╔═══██╗██╔══██╗██╔══██╗██║
+██╔████╔██║██║   ██║██║  ██║███████║██║
+██║╚██╔╝██║██║   ██║██║  ██║██╔══██║██║
+██║ ╚═╝ ██║╚██████╔╝██████╔╝██║  ██║██║
+╚═╝     ╚═╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝
+              LOCAL CODING & AGENT HARNESS
 ```
 
-```text
-Your task
-   ↓
-Orchestra Conductor — plan and dependency score
-   ↓
-Specialist ensemble — research, product, code, operations, growth…
-   ↓
-Counterpoint Critic ↔ Lead Arranger — adversarial debate and repair
-   ↓
-Senior Sound Engineer + Test Percussionist + Security Tuner
-   ↓
-Evidence-backed result, checkpoint, and resumable run history
-```
+**One prompt. One persistent coder. An orchestra only when the work earns it.**
 
-The default path is entirely local. Public research packages can optionally use an
-OpenAI, Anthropic, or Google API model, but only after explicit per-task consent.
-Potential secrets remain on the local route.
+MODAI turns a local Ollama model into a practical coding harness that inspects the real project, edits files atomically, runs deterministic quality gates, repairs current failures in the same session, and resumes from an append-only transcript. It is designed for Apple Silicon laptops, stays local by default, and keeps the older multi-agent orchestra behind an explicit compatibility mode.
 
-> Current release: **4.2.0 — Less rehearsal. More working software.**
-> Simple software tasks go straight to implementation, then machine checks and
-> one evidence-based review. Vision-capable local models also inspect the actual
-> desktop/mobile screenshots. Long reference documents no longer become work orders.
+Version 5.0 replaces persona-heavy planning for ordinary software tasks with a persistent **Code Virtuoso** session. The useful musical metaphor remains in the interface; progress is now measured by artifacts, passing gates, and verified fixes—not by how many agents spoke.
 
-```text
-Simple website → Code Virtuoso → deterministic browser checks → local visual/source review
-                                      ↑                              │
-                                      └── concrete blocking repair ──┘
-```
-
-More roles do not mean more independent minds: local specialists share one model.
-For a simple static page, the browser is the tester; security review is added when
-forms, credentials, storage, API calls or third-party scripts are detected.
+[Product site](https://wearetheartmakers.github.io/modAI/) · [We Are The Art Makers](https://wearetheartmakers.com) · [Architecture](docs/HARNESS_ARCHITECTURE.md) · [4.x migration](docs/MIGRATION_FROM_ORCHESTRATOR.md)
 
 ## Why MODAI
 
-- **Local by default:** prompts, project files, intermediate outputs, and long-term
-  run state remain on the computer unless hybrid routing is explicitly approved.
-- **Unlimited local tokens:** Ollama inference has no MODAI token ceiling. A local
-  run is never paused because its input/output count crossed a budget value.
-- **Cloud cost guard:** only paid API tokens count against the configurable cloud
-  budget. At the boundary, MODAI keeps the run alive and asks the user to add, for
-  example, `250k`, `1m`, or `2m` tokens, or to explicitly pause.
-- **One model, many disciplines:** a single loaded model avoids multiplying model
-  memory on 16 GB machines while logical roles provide focused instructions and
-  tools.
-- **Real tools, real evidence:** agents inspect files, apply changes, run allowlisted
-  commands, validate complete static applications, review diffs, and checkpoint results.
-- **Evidence-based completion:** required artifacts must exist and direct-build
-  artifacts must differ from their baseline. Current machine errors and concrete
-  review findings block completion; warnings and personal taste do not.
-- **Long-running work:** every meaningful step is written to a run directory and can
-  be resumed after interruption.
-- **Keyboard-native TUI:** arrow-key menus, a cursor-aware prompt editor, bracketed
-  paste support, Turkish/English UI, and live input/output token telemetry.
+- Local-first: project files and model prompts go to the local Ollama endpoint by default.
+- Persistent: one coding conversation survives read → edit → test → repair cycles.
+- Productive: `auto` routes normal code, bug, test, and website work directly to one coder.
+- Exact: a first-class atomic `edit` tool rejects missing, ambiguous, or overlapping replacements before touching disk.
+- Verifiable: project-aware tests and a real Playwright browser gate run outside the model.
+- Resumable: messages, tool calls, usage, events, and verification reports are appended to `session.jsonl`.
+- Controllable: steering, follow-up, abort, manual compaction, read-only mode, and explicit orchestra mode.
+- Cost-safe: local tokens are metered for visibility but never limited. A budget applies only to an explicitly enabled paid cloud provider.
 
-## The ensemble
+## Quick start on macOS
 
-Internal role IDs remain stable for automation; the terminal presents musical names.
-
-| Role ID | Stage name | Responsibility |
-|---|---|---|
-| `business_strategist` | Strategy Composer | Positioning, business model, priorities, measurable outcomes |
-| `market_researcher` | Market Signal Scout | Market evidence, trends, segments, source URLs |
-| `customer_researcher` | Audience Insight Lead | Jobs, pains, motivations, interview hypotheses |
-| `competitor_analyst` | Competitive Frequency Analyst | Competitor comparison and differentiation |
-| `product_manager` | Product Arranger | Scope, stories, acceptance criteria, roadmap |
-| `financial_analyst` | Finance Metronome | Unit economics, scenarios, costs, cash assumptions |
-| `operations_manager` | Stage Manager | Process, ownership, bottlenecks, service levels |
-| `growth_marketer` | Growth Amplifier | Channels, messaging, experiments, measurement |
-| `sales_strategist` | Sales Soloist | ICP, offer, funnel, objections, sales playbook |
-| `legal_risk` | Risk Tuner | Legal, privacy, regulatory, and contract flags |
-| `project_manager` | Tempo Manager | Dependencies, milestones, sequencing, completion definition |
-| `researcher` | Technical Signal Scout | Primary-source and repository-backed technical research |
-| `data_analyst` | Data Rhythm Analyst | Reproducible calculations and evidence |
-| `architect` | Systems Composer | Interfaces, data flow, architecture, failure modes |
-| `ux_designer` | Experience Arranger | Flows, information architecture, accessibility |
-| `coder` | Code Virtuoso | Small, verified file changes and tests |
-| `critic` | Counterpoint Critic | Adversarial review of assumptions and contradictions |
-| `integrator` | Lead Arranger | Conflict resolution and authorized repair |
-| `reviewer` | Senior Sound Engineer | Correctness, maintainability, requirements, edge cases |
-| `tester` | Test Percussionist | Happy path, failure path, and regression tests |
-| `security_reviewer` | Security Tuner | Threats, input boundaries, secrets, dependencies |
-| `fact_checker` | Score Verifier | Independent verification of external claims |
-
-Quality roles are reserved by the orchestration engine. The planner cannot spend the
-entire agent capacity on duplicate reviewers or prematurely claim a quality pass.
-
-## Requirements
-
-- macOS or Linux
-- Python 3.10 or newer with `venv`, `pip`, and `pyexpat`
-- Node.js is recommended for deterministic JavaScript syntax checks
-- [Ollama](https://ollama.com/download), running locally
-- About 10 GB of free disk space for the recommended 9B setup
-- Optional: internet access for web research
-- Optional: an API key for OpenAI, Anthropic, or Google hybrid routing
-
-## Install
+Requirements: macOS on Apple Silicon or Intel, Python 3.11+, [Ollama](https://ollama.com), and about 8 GB of free disk for the recommended M1 Pro model.
 
 ```bash
 git clone https://github.com/WeAreTheArtMakers/modAI.git
@@ -124,727 +39,238 @@ cd modAI
 ./setup.sh
 ```
 
-`setup.sh` checks Ollama and Python, creates a private `.venv`, installs the matching
-Playwright Chromium build, analyzes hardware, downloads a suitable local model,
-builds `mod-agent`, runs all tests, and installs the global `modai` launcher in
-`~/.local/bin`.
-
-If that directory is not on `PATH`, add it once:
+The installer creates the virtual environment, installs Chromium for visual tests, prepares the local model, and installs the `modai` command. Open any project directory and run:
 
 ```bash
-echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.zprofile
-source ~/.zprofile
-```
-
-Then enter any project and launch MODAI:
-
-```bash
-cd /path/to/project
+cd /path/to/your/project
 modai
 ```
 
-The launcher automatically uses the directory from which it was invoked as the
-workspace. An explicit `--workspace` always wins.
-
-Choose another base model during setup:
+Or start immediately with one prompt:
 
 ```bash
-MODAI_BASE_MODEL=qwen3.5:4b ./setup.sh
+modai "Fix the failing tests, implement the smallest correct change, and verify it"
 ```
 
-Reinstall only the global command with `./install-command.sh`.
+The current directory is the workspace unless `--workspace` is supplied. MODAI never needs to copy the project into its own repository.
 
-### Update an existing installation
+## The default working loop
 
-Stop an active task with `Ctrl+C` in **its own terminal** so it checkpoints first.
-Already-running Python processes do not hot-reload new orchestration code.
+```text
+prompt → deterministic route → persistent Code Virtuoso
+       → inspect → precise edit/write → focused test
+       → project verification → exact repair feedback
+       → PASS or resumable needs_attention
+```
+
+There is no planner call or debate round on the normal software path. If a model rereads without changing evidence, the no-progress guard asks for a concrete smallest edit. If a response is truncated while it contains tool calls, none of those calls are executed.
+
+## Modes
 
 ```bash
-cd /path/to/modAI
-git pull --ff-only
-.venv/bin/python -m pip install -r requirements.txt
-.venv/bin/python -m playwright install chromium
-.venv/bin/python -m unittest discover -s tests
-./install-command.sh
-modai --version
-cd /path/to/your/project
+modai --mode auto "task"       # default; strongly favors the solo coder
+modai --mode solo "task"       # always one persistent coding session
+modai --mode orchestra "task"  # enables bounded read-only delegation
+modai --full-orchestra "task"  # legacy 4.x planner/persona engine
+```
+
+`orchestra` does not give every specialist write access. The main Code Virtuoso is the mutator. Delegates are bounded and read-only. `--full-orchestra` exists for saved workflows that deliberately depend on the older plan/debate/reviewer sequence.
+
+## Coding tools
+
+The 5.x model-facing surface is intentionally small:
+
+| Tool | Purpose | Safety |
+|---|---|---|
+| `read` | Read a targeted, numbered line range | Bounded output |
+| `grep` | Search project text with ripgrep | Bounded matches |
+| `find` | Find paths by glob | Workspace confined |
+| `ls` | Show a shallow project tree | Ignores generated/vendor trees |
+| `edit` | Apply exact replacements | Unique, non-overlapping, atomic |
+| `write` | Create or replace a text file | Atomic replacement |
+| `bash` | Run test/build/read commands | Argument array; no shell interpolation |
+| `git` | Inspect status/diff/history | Mutating subcommands rejected |
+| `web_search` | Search public evidence | Network toggle and bounded results |
+| `fetch_url` | Read one public source | HTTP(S), SSRF protection, bounded text |
+| `delegate` | Gather independent evidence | Explicit orchestra mode; read-only and bounded |
+
+Full command output is written under the run’s `logs/` directory. The model sees a compact result so a verbose build cannot consume the whole context window.
+
+## Sessions and control
+
+Every 5.x run has a `state.json` summary and an append-only `session.jsonl` transcript under `memory/runs/<RUN_ID>/`.
+
+```bash
+modai --list-runs
+modai --session RUN_ID
 modai --resume RUN_ID
+modai --compact RUN_ID
+modai --inspect-run RUN_ID
 ```
 
-This update does not require downloading or rebuilding your model. Legacy simple
-software runs are migrated to a direct implementation plan; their previous plans
-and outputs remain in `migration_history`, and existing project files are preserved.
-New runs record whether write permission was inferred or explicitly selected. Only
-known inferred permissions are recalculated on resume. Unknown legacy read-only
-permissions stay read-only until you explicitly authorize a change:
+Inside the command screen:
+
+```text
+/new TASK                start a new persistent coding session
+/session [RUN_ID]        show status, usage, files, and latest gates
+/resume [RUN_ID]         continue the same conversation and repository state
+/compact [RUN_ID]        preserve objective/recent tool pairs in a smaller context
+/runs                    list recent sessions
+```
+
+The internal session API also supports FIFO `steer(...)`, FIFO `follow_up(...)`, and `abort()` controls. They are consumed only at safe model-turn boundaries—never halfway through a filesystem mutation.
+
+## Command reference
+
+### Task and workspace
 
 ```bash
-modai --resume RUN_ID --allow-write
+modai "TASK"
+modai --workspace /absolute/project/path "TASK"
+modai --read-only "Review this repository and report defects"
+modai --allow-write --resume RUN_ID
 ```
 
-## First run
+### Model and context
 
-Run `modai` without a task to open the arrow-key Command Center.
-
-```text
-MODAI
-LOCAL AGENT ORCHESTRATION
-
-COMMAND CENTER
-↑ ↓ select · Enter open · q back
-
-❯ Start a new task
-  Select working directory
-  Resume a task
-  Model and parameters
-  Orchestration profile
-  Command screen
-  System status
-  Cloud model
-  Türkçe / English
-  Exit
-
-MODEL  mod-agent:latest · num_ctx 8192
-FOLDER /path/to/project
-TEAM   up to 24 logical agents · one model · internet on
-CLOUD  off (local default)
+```bash
+modai --list-models
+modai --recommend-model
+modai --model qwen3.5:9b "TASK"
+modai --num-ctx 8192 "TASK"
+modai --num-ctx 16384 "TASK"
 ```
 
-Choose **Start a new task**, write one prompt, and press Enter. MODAI immediately
-starts a local-first run; there is no second work-mode or routing questionnaire. A
-prompt containing an explicit read-only instruction automatically removes write
-tools. Advanced cloud work remains deliberate through `/hybrid` or `--allow-cloud`.
+For an M1 Pro with 16 GB unified memory, begin with the project’s recommended 9B-class Qwen coding model at `num_ctx=8192`. Use `16384` only when a repository truly needs the larger live context; it reduces generation speed and available memory. MODAI’s compaction and targeted reads are designed to make 8192 useful.
 
-Navigation:
+### Harness and repair
 
-- `↑` / `↓`: move through a menu
-- `Enter` or `→`: open
-- `q`, `Esc`, or `←`: go back
-- `j` / `k`: Vim-style down/up alternatives
+```bash
+modai --mode auto "TASK"
+modai --mode solo "TASK"
+modai --mode orchestra "TASK"
+modai --repair-rounds 4 "TASK"
+modai --max-tool-rounds 12 "TASK"       # legacy compatibility setting
+modai --max-hours 24 "TASK"             # legacy engine active-time guard
+```
 
-The task editor supports cursor movement without deleting the prompt:
+### Network and cloud
 
-- `←` / `→`: move one character
-- `Option+←` / `Option+→`: move one word
-- `Home` / `End` or `Ctrl+A` / `Ctrl+E`: line boundaries
-- `Backspace` / `Delete`: edit at the cursor
-- `↑` / `↓`: prompt history
-- bracketed multiline paste with a localized “Pasted text” counter
-- `Enter`: submit
-- `Esc`: cancel
+```bash
+modai --no-internet "TASK"
+modai --allow-cloud "Public research task"
+```
 
-Menus use the terminal's alternate screen and return to the existing output buffer
-when work begins; they do not push a screenful of empty rows into task history.
-During inference, press **`d`** to expand/collapse recent tool paths and queries.
-Use **`--verbose`** to start with details expanded. The one-line activity indicator
-shows elapsed time and streamed response activity, not hidden model reasoning.
+Cloud is off by default. Configure it interactively with `/cloud setup`, then opt in per task with `--allow-cloud` or `/hybrid TASK`. In orchestra mode, only the bounded delegate can use that cloud runtime; the persistent writer remains local. Prompts containing obvious secrets disable cloud routing. The cloud token budget is a paid-provider cost guard only:
 
-## Model and runtime parameters
+```bash
+modai --cloud-token-budget 1000000 --allow-cloud "TASK"
+```
 
-Open **Model and parameters** from the Command Center. Select an installed Ollama
-model or choose **Edit model parameters**. The editor can apply settings for the
-current session or persist them to `config.json`.
+Local Ollama usage has no token ceiling. When a cloud budget is reached, MODAI asks whether to add more tokens or pause; it does not pretend the unfinished task completed.
 
-| UI name | Config key | Default | Range / example | Meaning |
-|---|---|---:|---|---|
-| `num_ctx` | `context_size` | `8192` | `2048–131072` | Context available to one model request |
-| `temperature` | `temperature` | `0.25` | `0–2` | Sampling variation |
-| `keep_alive` | `keep_alive` | `5m` | `30m`, `1h`, `-1` | How long Ollama keeps model weights loaded |
-| `think` | `think` | `false` | `on/off` | Model reasoning mode when supported |
+### Interface and diagnostics
 
-The same numeric values can be changed from the command screen:
+```bash
+modai --language tr
+modai --language en
+modai --verbose "TASK"
+modai --no-color
+modai --version
+```
+
+## Command-screen reference
 
 ```text
+/help                    command help
+/menu                    return to the arrow-key home screen
+/model MODEL             select the local model
+/workspace PATH          select the project directory
+/internet on|off         toggle research network tools
+/profile fast|balanced|deep|marathon
 /set num_ctx 16384
 /set temperature 0.2
+/set repair_rounds 4
+/set cloud_token_budget 1000000
+/cloud setup|off
+/hybrid TASK
+/language tr|en
+/agents                  show the legacy specialist catalog
+/clear
+/exit
 ```
 
-Or for one CLI invocation:
+Profiles mainly affect the legacy orchestra. The 5.x harness deliberately avoids manufacturing more work for a simple task.
 
-```bash
-modai --num-ctx 16384 "Inspect, repair, and test this project"
-```
+## Quality gates
 
-### Recommended M1 Pro 16 GB configuration
+MODAI extracts an artifact contract from explicit filenames in the prompt. A task naming `index.html`, `styles.css`, and `app.js` cannot complete while one is missing or empty.
+
+For static sites it also runs:
+
+- local asset reference checks;
+- HTML structure, viewport, duplicate IDs, image `alt`, CSS brace, and JavaScript syntax checks;
+- Playwright Chromium at mobile, landscape, tablet, and desktop sizes;
+- horizontal overflow, visible content, broken anchors/local navigation, console errors, runtime exceptions, and menu-toggle checks;
+- screenshots under the target site’s `.modai/browser/` directory.
+
+For detected Python and Node projects it runs available pytest and package scripts (`test`, `lint`, `build`) with bounded logs. A failed gate is injected back into the same coding conversation as exact current evidence.
+
+## Privacy and permissions
+
+- The default endpoint is `127.0.0.1`; remote Ollama hosts are rejected by configuration validation.
+- Paths are resolved inside the selected workspace.
+- Shell strings are not evaluated. `bash` receives an argument array.
+- Destructive commands and mutating Git operations are denied.
+- Read-only sessions do not advertise `write` or `edit` schemas.
+- Product, UX, project, operations, growth, and integrator roles are read-only in legacy mode; the coder is the default mutator.
+- Paid cloud access requires provider setup and explicit per-task consent.
+
+Review changes before committing them. MODAI intentionally does not commit or push the target project for the model.
+
+## Configuration
+
+`config.example.json` documents all supported values. Harness-focused defaults:
 
 ```json
 {
   "model": "mod-agent:latest",
+  "workspace": ".",
   "context_size": 8192,
   "temperature": 0.25,
-  "max_tool_rounds": 8,
-  "keep_alive": "5m",
-  "think": false,
-  "execution_mode": "adaptive",
-  "max_parallel_agents": 0
-}
-```
-
-`num_ctx=16384` is available when a task genuinely needs more context, but it uses
-more memory and usually reduces throughput. On a 16 GB machine, one loaded model and
-one active local generation is the stable default. Run `modai --recommend-model` to
-inspect the hardware-aware recommendation.
-
-## Orchestration profiles
-
-| Profile | Agent capacity | Debate rounds | Repair rounds | Active-time guard |
-|---|---:|---:|---:|---:|
-| `fast` | 8 | 0 | 1 | 2 h |
-| `balanced` | 16 | 1 | 2 | 8 h |
-| `deep` | 24 | 2 | 2 | 12 h |
-| `marathon` | 32 | 3 | 3 | 24 h |
-
-These are upper bounds, not a target number of agents. MODAI consolidates a simple
-software request into one implementation part and then runs independent quality
-gates. It does not recruit market researchers merely to read local CSS.
-
-Choose **Orchestration profile → Edit custom settings** to edit:
-
-| Setting | Default | Range | Purpose |
-|---|---:|---:|---|
-| `max_agents` | 24 | 1–256 | Maximum logical role steps in a run |
-| `debate_rounds` | 2 | 0–20 | Counterpoint Critic / Lead Arranger exchanges |
-| `repair_rounds` | 2 | 0–20 | Maximum failed-gate repair passes |
-| `max_hours` | 12 | 0.1–168 | Active inference time guard |
-| `cloud_token_budget` | 500,000 | 1,000–1,000,000,000 | Paid API cost guard only |
-| `max_tool_rounds` | 8 | 1–50 | Configured ceiling per agent |
-| `agent_retries` | 1 | 0–10 | Retry count for failed agent steps |
-| `max_parallel_agents` | 0 | 0–8 | Read-only parallel worker cap; `0` uses hardware advice |
-
-The editor also exposes `execution_mode`: `sequential`, `adaptive`, or `parallel`.
-Adaptive mode deliberately resolves to one local request on a 16 GB M1 Pro. On
-higher-memory machines it schedules dependency-ready read-only parts concurrently.
-In a clean Git repository, independent writers use disposable worktrees and return
-patches to one serialized Lead Arranger merge queue. Dirty or non-Git workspaces
-automatically keep writers serial.
-
-Research and audit roles use a smaller internal tool-loop ceiling even when the
-profile allows more. This prevents repeated `search_web`/`read_file` calls from
-consuming hundreds of thousands of tokens. Code roles retain a larger working window.
-
-## Local tokens and cloud cost control
-
-MODAI keeps separate total and paid-provider counters: `input_tokens`,
-`output_tokens`, `cloud_input_tokens`, `cloud_output_tokens`, `requests`, and
-`cloud_requests`.
-
-### Local mode
-
-There is no token budget. A run using only Ollama may pass 500,000, 1.5 million, or
-more tokens without a budget warning or automatic pause. `--max-total-tokens` from
-older releases is retained as a compatibility alias, but it now configures only the
-cloud cost guard.
-
-### Hybrid / cloud mode
-
-Set an initial guard:
-
-```bash
-modai --allow-cloud --cloud-token-budget 500000 \
-  "Research public competitors, then create a private local strategy brief"
-```
-
-When paid usage reaches the guard, the current run remains checkpointed and MODAI
-asks:
-
-```text
-CLOUD BUDGET NOTICE
-The paid provider has used 501,240 tokens; the configured limit is 500,000 tokens.
-This is MODAI's cost guard; it does not increase the provider's actual quota.
-Tokens to add [Enter=1m, 250k/2m, or pause] ›
-```
-
-- Press `Enter` to add 1,000,000 tokens.
-- Enter `250k`, `1m`, `2m`, or an exact integer for a custom extension.
-- Enter `pause` only when you want the run to stop at its checkpoint.
-
-An extension changes MODAI's internal allowance; it does **not** buy provider credit
-or bypass an OpenAI/Anthropic/Google account quota. Provider billing and rate limits
-still apply.
-
-## Hybrid privacy routing
-
-Configure a provider from **Cloud model** or with `/cloud setup`. API keys are entered
-without terminal echo and stored in macOS Keychain. On Linux, use `OPENAI_API_KEY`,
-`ANTHROPIC_API_KEY`, or `GOOGLE_API_KEY`.
-
-Cloud routing requires all of the following:
-
-1. cloud support is configured;
-2. the user chooses Hybrid for this task or passes `--allow-cloud`;
-3. the planned package has `needs_web=true`;
-4. its role appears in `cloud_roles`;
-5. the package has no obvious credential or secret pattern.
-
-Only the isolated public research package is sent. Workspace files, local listings,
-other agent outputs, and private task context are excluded. If the provider fails,
-the package falls back to the local model.
-
-Consumer ChatGPT, Claude, or Gemini subscriptions are not treated as API credit.
-MODAI currently supports provider API keys; account-login/OAuth adapters are a future
-integration and must follow each provider's terms.
-
-## One-shot CLI
-
-```bash
-# Use the current directory automatically
-modai "Inspect the project, fix the failing tests, and verify the result"
-
-# Explicit workspace
-modai --workspace /path/to/project "Review and improve accessibility"
-
-# Read-only audit
-modai --read-only "Audit this repository and report risks"
-
-# Fast local execution
-modai --profile fast "Fix the mobile navigation bug and test it"
-
-# Simple software tasks skip planner inference and debate automatically.
-# Opt back into the full configured ensemble when deliberation is useful:
-modai --full-orchestra --profile deep "Review the architecture and repair the application"
-
-# Expanded tool details / read-only run diagnostics (no model call)
-modai --verbose "Build a responsive landing page in index.html"
-modai --inspect-run RUN_ID
-
-# Deeper local execution — still no token ceiling
-modai --profile deep --repair-rounds 4 \
-  "Repair the landing page and keep working until all quality gates pass"
-
-# Larger context
-modai --num-ctx 16384 "Analyze this larger codebase"
-
-# No web access
-modai --no-internet "Work only from repository evidence"
-
-# English interface
-modai --language en
-
-# Resume a checkpoint
-modai --resume 20260913-233710-921520
-
-# Hardware/model report
-modai --recommend-model
-```
-
-### Complete CLI reference
-
-| Option | Description |
-|---|---|
-| `TASK...` | Task text; omit it to open the TUI |
-| `--workspace PATH` | Workspace; defaults to the invocation directory |
-| `--model MODEL` | Local Ollama model for this invocation |
-| `--profile fast\|balanced\|deep\|marathon` | Orchestration preset |
-| `--full-orchestra` | Disable automatic direct-build routing; use configured planning/debate |
-| `--verbose` | Show tool paths/queries; toggle during inference with `d` |
-| `--inspect-run RUN_ID` | Inspect saved phase, gates, recent tools and request metrics without inference |
-| `--max-agents N` | Logical agent-step capacity, 1–256 |
-| `--debate-rounds N` | Adversarial debate rounds, 0–20 |
-| `--repair-rounds N` | Failed-gate repair rounds, 0–20 |
-| `--max-tool-rounds N` | Configured per-agent tool ceiling, 1–50 |
-| `--agent-retries N` | Failed-step retries, 0–10 |
-| `--execution-mode sequential\|adaptive\|parallel` | Scheduling policy |
-| `--max-parallel-agents N` | Concurrent read-only cap, 0–8; `0` is automatic |
-| `--max-hours HOURS` | Active processing guard, 0.1–168 |
-| `--num-ctx N`, `--context-size N` | Ollama context, 2048–131072 |
-| `--cloud-token-budget N` | Paid API guard, 1,000–1,000,000,000 |
-| `--max-total-tokens N` | Compatibility alias for `--cloud-token-budget` |
-| `--allow-cloud` | Permit eligible public packages to use configured cloud API |
-| `--read-only` | Remove all file-write tools |
-| `--allow-write` | Explicitly authorize edits, including for a legacy read-only resumed run |
-| `--no-visual-review` | Skip model screenshot review; deterministic browser checks remain enabled |
-| `--no-internet` | Remove web search/fetch tools |
-| `--language tr\|en` | Interface language |
-| `--resume [RUN_ID]` | Resume the selected/latest unfinished run |
-| `--list-runs` | Print recent run metadata as JSON |
-| `--list-models` | List installed local models |
-| `--recommend-model` | Print hardware-aware recommendation as JSON |
-| `--no-color` | Disable ANSI colors |
-| `--version` | Print version |
-
-## Command screen reference
-
-| Command | Purpose |
-|---|---|
-| `/help` | Show command help |
-| `/menu` | Return to the arrow-key Command Center |
-| `/agents` | List role IDs and localized stage names |
-| `/models` | List installed Ollama models |
-| `/recommend-model` | Show the local recommendation |
-| `/model MODEL` | Change the active model |
-| `/workspace PATH` | Change workspace |
-| `/internet on\|off` | Toggle research tools |
-| `/profile PROFILE` | Apply a built-in profile |
-| `/set num_ctx N` | Change context size |
-| `/set temperature N` | Change temperature |
-| `/set max_agents N` | Change logical agent capacity |
-| `/set debate_rounds N` | Change debate rounds |
-| `/set repair_rounds N` | Change repair rounds |
-| `/set max_tool_rounds N` | Change tool ceiling |
-| `/set agent_retries N` | Change step retries |
-| `/set max_hours N` | Change active-time guard |
-| `/set cloud_token_budget N` | Change paid-provider guard |
-| `/set max_parallel_agents N` | Set the read-only worker cap; `0` uses hardware advice |
-| `/cloud` | Show cloud policy and status |
-| `/cloud setup` | Configure provider/model/key |
-| `/cloud off` | Persistently disable cloud use |
-| `/hybrid TASK` | Run with public-research cloud consent |
-| `/language tr\|en` | Change UI language |
-| `/runs` | List recent runs |
-| `/resume [RUN_ID]` | Resume an unfinished run |
-| `/status` | Print settings as JSON |
-| `/clear` | Clear terminal |
-| `/exit` | Exit MODAI |
-
-Text that does not begin with `/` starts a local task.
-
-## Configuration and environment
-
-`setup.sh` copies the tracked `config.example.json` to the local, Git-ignored
-`config.json` when needed. CLI flags override environment variables, and environment
-variables override the file.
-
-```json
-{
-  "model": "mod-agent:latest",
-  "host": "http://127.0.0.1:11434",
-  "workspace": "./workspace",
-  "context_size": 8192,
-  "temperature": 0.25,
-  "max_agents": 24,
-  "max_tool_rounds": 8,
-  "debate_rounds": 2,
-  "repair_rounds": 2,
-  "max_hours": 12,
-  "max_total_tokens": 500000,
-  "agent_retries": 1,
-  "internet_enabled": true,
-  "keep_alive": "5m",
-  "think": false,
-  "language": "tr",
+  "harness_mode": "auto",
+  "harness_max_turns": 80,
+  "compaction_reserve_tokens": 2048,
+  "repair_rounds": 4,
   "cloud_enabled": false,
-  "cloud_provider": "openai",
-  "cloud_model": "",
-  "cloud_roles": "market_researcher,competitor_analyst,growth_marketer",
-  "execution_mode": "adaptive",
-  "max_parallel_agents": 0,
-  "evidence_cache_entries": 128,
-  "browser_quality_gate": true,
-  "full_orchestra": false,
-  "stream_output": true,
-  "visual_review": true
+  "max_total_tokens": 500000
 }
 ```
 
-The stored `max_total_tokens` key is retained for compatibility; since 3.5 it means
-**cloud token budget**, never a local-run ceiling.
-`full_orchestra` disables automatic direct-build routing. `stream_output=false`
-uses non-streaming Ollama calls for backends with incompatible streaming support;
-the elapsed-time indicator remains available.
-`visual_review` enables local screenshot review when the selected model reports
-vision support. Unsupported models receive source review, and the checkpoint clearly
-records that visual review was unavailable; it does not pretend images were assessed.
+Older keys remain readable. `max_total_tokens` is retained as the storage/CLI compatibility name for the **cloud-only** budget. See [Migration from Orchestrator](docs/MIGRATION_FROM_ORCHESTRATOR.md).
 
-| Environment variable | Setting |
-|---|---|
-| `MOD_AGENT_MODEL` | `model` |
-| `MOD_AGENT_HOST` | `host` |
-| `MOD_AGENT_CONTEXT_SIZE` | `context_size` / `num_ctx` |
-| `MOD_AGENT_TEMPERATURE` | `temperature` |
-| `MOD_AGENT_WORKSPACE` | `workspace` |
-| `MOD_AGENT_MAX_AGENTS` | `max_agents` |
-| `MOD_AGENT_MAX_TOOL_ROUNDS` | `max_tool_rounds` |
-| `MOD_AGENT_DEBATE_ROUNDS` | `debate_rounds` |
-| `MOD_AGENT_REPAIR_ROUNDS` | `repair_rounds` |
-| `MOD_AGENT_MAX_HOURS` | `max_hours` |
-| `MODAI_CLOUD_TOKEN_BUDGET` | paid API guard |
-| `MODAI_MAX_TOTAL_TOKENS` | legacy cloud-budget alias |
-| `MOD_AGENT_AGENT_RETRIES` | `agent_retries` |
-| `MOD_AGENT_INTERNET` | `internet_enabled` |
-| `MOD_AGENT_KEEP_ALIVE` | `keep_alive` |
-| `MOD_AGENT_THINK` | `think` |
-| `MOD_AGENT_LANGUAGE` | `language` |
-| `MODAI_CLOUD_ENABLED` | `cloud_enabled` |
-| `MODAI_CLOUD_PROVIDER` | `cloud_provider` |
-| `MODAI_CLOUD_MODEL` | `cloud_model` |
-| `MODAI_CLOUD_ROLES` | comma-separated allowlist |
-| `MODAI_EXECUTION_MODE` | `sequential`, `adaptive`, or `parallel` |
-| `MODAI_MAX_PARALLEL_AGENTS` | read-only worker cap; `0` is automatic |
-| `MODAI_EVIDENCE_CACHE_ENTRIES` | run-local evidence cache capacity |
-| `MODAI_BROWSER_QUALITY_GATE` | enable/disable local Chromium gate |
-
-The Ollama host is intentionally restricted to localhost.
-
-## How a run completes
-
-1. The Conductor chooses a route. Short software instructions receive a deterministic
-   direct-build plan, with **zero planner model requests**. Complex work still receives
-   a model-generated dependency score. `--full-orchestra` overrides automatic routing.
-2. A long pasted Markdown reference following the user's instruction is separated
-   from that instruction. Only requested filenames become contract items: a product
-   README mentioning `Node.js` or `orchestrator.py` is not a request to create them.
-   The complete original text remains available through `read_task_reference`.
-3. Code Virtuoso must make a successful file edit before an implementation step can
-   complete. Direct work uses compact prompts, a context ceiling of 8192, temperature
-   at most 0.3, and reasoning mode off, without changing saved model preferences.
-   `--full-orchestra` uses the configured model preferences instead.
-4. Shared file/URL evidence avoids redundant I/O. File reads are keyed by actual
-   content hash, so external edits invalidate them. Repeated evidence within a part
-   becomes a short reuse note; fresh excerpts still cost input tokens. Old tool
-   exchanges are bounded while preserving complete tool-call/result transactions.
-   Large completed writes are summarized with their actual success result, so
-   dropping a code payload cannot make the model forget it already wrote the file.
-5. If an agent repeats tools without producing new evidence for two rounds, the
-   Conductor stops that part and hands its evidence to the Lead Arranger.
-   A writer with no real edit fails explicitly instead of claiming completion.
-6. Direct static-site work skips debate and runs machine checks **before** spending
-   tokens on one structured reviewer. There is no duplicate model tester for a simple
-   static page. Security-sensitive features add a security reviewer. Complex work
-   retains configured debate and relevant verification roles.
-7. Static sites pass both deterministic source checks and a real local Chromium
-   render at mobile, landscape, tablet, and desktop sizes.
-8. SHA-256 baselines distinguish existing files from new implementation. Missing or
-   unchanged requested artifacts, nonzero exit codes and current machine errors
-   block completion. A direct reviewer returns structured `blocking_issues`, each
-   with a file, current evidence and repair action. An empty list never schedules
-   arbitrary code edits. Malformed review output remains unresolved, not silently
-   passed. Direct runs summarize evidence without an extra finalizer model request.
-
-`validate_static_site` checks referenced assets, viewport metadata, title, duplicate
-IDs, image alt text, CSS brace balance, and JavaScript syntax through local Node.js.
-`validate_browser_quality` serves the workspace only on `127.0.0.1`, saves four
-screenshots under `.modai/browser/`, and rejects horizontal overflow, JavaScript or
-console errors, broken in-page navigation, failed HTTP navigation, and pages with no
-visible content.
-It also exercises explicitly identified navigation-menu buttons when navigation
-links are hidden, catching the common "mobile hamburger with no click handler" bug.
-
-**A browser PASS is not a beauty score.** Screenshots plus structural/runtime tests
-do not prove good design. When vision is supported, the same local model receives
-desktop and mobile images for hierarchy, readability, spacing and visible requirement
-review. Numeric scores and taste are advisory; only concrete defects block. Images
-are never routed to the cloud by this feature.
-
-Machine warnings (for example a missing optional `<main>` landmark) stay advisory
-unless the user explicitly required that feature. Original error quotations are
-historical reports; only current source/browser evidence can establish a live defect.
-
-## Checkpoints and recovery
-
-```text
-memory/runs/<RUN_ID>/
-├── state.json
-└── final.txt
-```
-
-The checkpoint records phase, cursors, artifact/research contracts, shared evidence
-cache, outputs, tool evidence, per-agent and total usage, efficiency, routing consent,
-and extended cloud budget. Updates use atomic temporary-file replacement.
+## Development and verification
 
 ```bash
-modai --resume                 # latest unfinished run
-modai --resume RUN_ID          # a specific run
+./setup.sh
+.venv/bin/python -m pytest -q
 ```
 
-Runs paused by the old all-token budget can be resumed normally in 4.2. Historical
-local token use no longer blocks startup.
-When a legacy run has no artifact baseline, the new baseline is captured at resume;
-the engine cannot reconstruct file contents from the original run start retroactively.
+The deterministic suite uses a scripted fake runtime and covers the persistent loop, native tools, atomic edits, truncated responses, no-progress recovery, resume, compaction, queues, permissions, routing, latest validation evidence, a real landing-page browser E2E fixture, a repair fixture, and legacy orchestra regression.
 
-## Security boundaries
-
-- No shell string is executed; commands are argument arrays.
-- Shell operators and mutating Git commands are rejected.
-- Paths are confined to the selected workspace.
-- Read-only mode removes write tools before the model sees their schemas.
-- Internet tools can be disabled globally.
-- Cloud is opt-in per task and restricted to eligible public packages.
-- Obvious keys, passwords, tokens, and private keys force local routing.
-- macOS API keys are stored in Keychain, never `config.json`.
-- Tool calls, writes, commands, and verdicts stay auditable.
-- The visual gate binds its temporary server to loopback and never publishes the site.
-
-No automated detector identifies every secret. Do not approve hybrid routing when the
-public/private boundary is ambiguous.
-
-## Performance and efficiency
-
-Logical agents are not separately loaded models. On the default M1 Pro setup, roles
-run sequentially against one local model. This prevents concurrent generations from
-multiplying KV-cache/context pressure on 16 GB memory.
-
-Adaptive scheduling uses the hardware probe: less than 24 GB stays at one request,
-24–47 GB permits two independent read-only parts, and larger systems permit up to
-four by default. Roles without file writes or terminal execution use shared-workspace
-read-only batches. In a clean Git repository, independent writer parts receive
-disposable detached worktrees; their binary-capable patches are conflict-checked in a
-temporary integration tree and then applied by one plan-ordered Lead Arranger merge
-queue. Dirty and non-Git projects fall back to serial writers without touching user
-changes.
-
-The live score keeps progress readable without streaming every internal thought:
-
-```text
-♫ SCORE  3/7
-  NOW    Code Virtuoso · applying CSS repair
-  NEXT   Test Percussionist
-  GATES  index.html PASS · static_site PASS · browser_quality pending
-  TOKENS 42,810 local · 0 cloud · FILES 4 · EFF 1.64/10k
-```
-
-`EFF` is verified contract items plus passed quality gates per 10,000 tokens. The run
-state also records per-agent input/output usage, changed-file count, and cache hits.
-Repeated identical terminal tool events collapse into a single `×N` line.
-Per-request diagnostics record input/output tokens, elapsed seconds, first-response
-latency, provider-reported prompt/generation time, message bytes, effective context
-and reasoning setting. Inspect them with `modai --inspect-run RUN_ID`.
-These measurements distinguish orchestration overhead from a slow model server.
-
-## Troubleshooting
-
-### A local run says the token budget was exceeded
-
-That process was started with pre-4.0 code already loaded. Let it checkpoint, launch
-a new process, and resume:
+Run the optional local-model benchmark:
 
 ```bash
-modai --resume RUN_ID
+.venv/bin/python tests/benchmark_local.py \
+  --task "Create a responsive static landing page and verify it"
 ```
 
-Do not raise `--max-total-tokens` for local work; it now concerns cloud only.
+Useful measurements are wall-clock time, model calls before first mutation, total calls, files changed, gate sequence, input/output tokens, and verified artifacts per 10k tokens.
 
-### Token use grows rapidly on a simple task
+## Architecture reference
 
-- Restart with 4.2 and resume the checkpoint; an old running process still uses old code.
-- Direct routing is automatic for simple software work, regardless of debate preset.
-- Inspect the artifact contract. Documentation filenames must not become deliverables.
-- Use `--inspect-run RUN_ID` to compare request size, duration and actual writes.
-- Put concrete files and acceptance criteria in one prompt.
-- Do not combine broad market research with a small CSS fix.
-- Increasing agent count or token allowance does not make a stalled writer productive.
-
-### Small requests are still slow after updating
-
-Check `ollama ps` and the run's request metrics. MODAI can bound the request it sends,
-but a custom model/backend may keep a larger resident context or substantial memory.
-Several open MODAI terminals can also submit requests to the same Ollama server;
-the in-run sequential scheduler is not a cross-process lock. Keep one active task
-while measuring. A spinner is activity feedback, not evidence of an artifact.
-
-### Model not found or Ollama unavailable
-
-```bash
-ollama list
-ollama pull qwen3.5:9b
-ollama serve
-```
-
-### Out of memory or very slow output
-
-Use `num_ctx=4096` or 8192, switch to `qwen3.5:4b`, keep one generation active,
-close memory-heavy apps, and prefer `fast` or `balanced`.
-
-### Quality gates keep failing
-
-Inspect the latest concrete reviewer/tester/security evidence before adding repair
-rounds:
-
-```bash
-modai --resume RUN_ID --repair-rounds 4
-```
-
-### Cloud provider rejects a request
-
-The MODAI guard is not provider credit. Check billing, API quota, model name, rate
-limits, and API key. Disable routing with `/cloud off` when needed.
-
-## Development and tests
-
-```bash
-source .venv/bin/activate
-python -m unittest discover -s tests -v
-python -m py_compile orchestrator.py config.py contracts.py evidence_cache.py roles.py tui.py tools/browser_gate.py
-```
-
-The regression suite covers terminal navigation, prompt editing and paste safety,
-workspace confinement, command validation, model advice, tool protocols, cloud
-routing, unlimited local-token semantics, cloud-budget extension, checkpoint resume,
-artifact contracts, evidence-cache invalidation, smart stopping, live score fields,
-valid and deliberately broken static applications, four real browser viewports, and
-machine-over-model quality-gate behavior.
-
-Productivity regressions exercise long pasted READMEs, filename parsing, external
-cache invalidation, bounded tool conversations, direct write-before-review order,
-stream assembly and alternate-screen restoration. Tests with scripted model clients
-verify control flow; they are not proof of real-model speed or design quality.
-
-Run an opt-in **real local-model** benchmark in a new temporary workspace:
-
-```bash
-.venv/bin/python tests/benchmark_local.py --model YOUR_INSTALLED_MODEL
-.venv/bin/python tests/benchmark_local.py --model YOUR_INSTALLED_MODEL \
-  --task "Create a compact responsive index.html with inline CSS, a main heading and three cards."
-```
-
-It records time to first file write, total duration, token usage and actual machine
-gates. It never uses paid providers or writes into an existing project. Run it when
-your other model tasks are idle; results depend on the selected model and backend.
-
-### Measured smoke test (4.2)
-
-On the development M1 Pro / 16 GB machine, `mod-agent:latest` (Qwen3.5 9B,
-GGUF Q4_K_M) completed a compact, single-file, responsive three-card page with
-local screenshot review enabled:
-
-| Measurement | Observed result |
-|---|---:|
-| First real file write | 54.0 s |
-| End-to-end completion | 84.8 s |
-| Model requests | 3 |
-| Input / output tokens | 4,930 / 752 |
-| Total local / cloud tokens | 5,682 / 0 |
-| Changed artifact + static checks + four browser viewports | PASS |
-| Local desktop/mobile image review | PASS (model judgment) |
-
-This is one narrowly scoped smoke test, not a general speed or design-quality
-guarantee. The model judged screenshots; the browser independently checked runtime
-behavior. The test does not certify product claims, content accuracy or every user
-journey. The deterministic regression suite separately exercises deliberately broken
-menus, stale evidence, unchanged files, permission migration and malformed reviews.
-
-## Current limitations
-
-- Parallel writer worktrees require a clean Git checkout; dirty or non-Git projects
-  deliberately use the serial writer queue.
-- Hybrid providers use API keys, not consumer-subscription login.
-- Cloud packages do not receive local tools or project files by design.
-- Token counts are telemetry, not a currency estimate.
-- Direct routing and security-feature detection are heuristics, not full semantic
-  analysis. A source-only reviewer cannot judge screenshots; vision review remains
-  model judgment rather than a guarantee of aesthetic quality.
-- There is no mandatory local token/request cost cap. No-progress checks, bounded
-  context and configured retry/repair limits control repetition instead.
-- `max_hours` remains a separate active-time guard.
-- Human review remains appropriate for production, legal, financial, and
-  security-critical decisions.
-
-## Suggested next milestones
-
-1. **Provider cost estimates:** optional currency estimates kept separate from token
-   telemetry and provider quota.
-2. **OAuth adapters:** supported account-login integrations only where provider terms
-   and APIs explicitly permit them.
-3. **Signed profile exchange:** import/export reviewed orchestration profiles without
-   allowing prompt files to broaden tool permissions.
-4. **Visual regression baselines:** optional pixel-diff history on top of the current
-   structural browser gate.
-5. **Cross-process inference coordination:** make competing terminal sessions visible
-   and queue them fairly instead of silently overloading one local model server.
-6. **Task-specific browser acceptance:** test real user journeys (menu, form, theme,
-   keyboard navigation), not only generic page structure and absence of errors.
-7. **Model qualification benchmarks:** compare first-write latency, repair success
-   and verified artifacts per minute before recommending a custom local model.
+The persistent loop and session boundaries were designed after studying the MIT-licensed [`earendil-works/pi`](https://github.com/earendil-works/pi) agent and coding-agent packages. MODAI is an independent Python/Ollama implementation, not a port. It adopts the architectural lessons—stable loop, safe steering boundaries, complete tool pairs, append-only sessions, bounded outputs—and preserves MODAI’s local-first, bilingual, terminal-native product identity.
 
 ## License
 
-WATAM
+See [LICENSE](LICENSE). Built by [We Are The Art Makers](https://wearetheartmakers.com).

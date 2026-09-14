@@ -45,6 +45,9 @@ class Settings:
     full_orchestra: bool = False
     stream_output: bool = True
     visual_review: bool = True
+    harness_mode: str = "auto"
+    harness_max_turns: int = 80
+    compaction_reserve_tokens: int = 2048
 
     def validate(self) -> None:
         if not self.model.strip():
@@ -83,6 +86,12 @@ class Settings:
             raise ValueError("max_parallel_agents 0 ile 8 arasında olmalı")
         if not 16 <= self.evidence_cache_entries <= 1024:
             raise ValueError("evidence_cache_entries 16 ile 1024 arasında olmalı")
+        if self.harness_mode not in {"solo", "auto", "orchestra"}:
+            raise ValueError("harness_mode solo, auto veya orchestra olmalı")
+        if not 8 <= self.harness_max_turns <= 500:
+            raise ValueError("harness_max_turns 8 ile 500 arasında olmalı")
+        if not 512 <= self.compaction_reserve_tokens <= 16384:
+            raise ValueError("compaction_reserve_tokens 512 ile 16384 arasında olmalı")
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -107,6 +116,15 @@ def load_settings(path: Path = DEFAULT_CONFIG) -> Settings:
         if not isinstance(parsed, dict):
             raise ValueError(f"{path.name} bir JSON nesnesi olmalı")
         data.update(parsed)
+
+    # Safe aliases emitted by older UI/export versions. Canonical values win
+    # when both are present; local_token_limit was informational and is ignored.
+    for old, new in (("cloud_token_budget", "max_total_tokens"),
+                     ("num_ctx", "context_size"), ("mode", "harness_mode")):
+        if old in data and new not in data:
+            data[new] = data[old]
+        data.pop(old, None)
+    data.pop("local_token_limit", None)
 
     known = {item.name for item in fields(Settings)}
     unknown = sorted(set(data) - known)
@@ -147,6 +165,9 @@ def load_settings(path: Path = DEFAULT_CONFIG) -> Settings:
         "MODAI_MAX_PARALLEL_AGENTS": ("max_parallel_agents", int),
         "MODAI_EVIDENCE_CACHE_ENTRIES": ("evidence_cache_entries", int),
         "MODAI_BROWSER_QUALITY_GATE": ("browser_quality_gate", to_bool),
+        "MODAI_MODE": ("harness_mode", str),
+        "MODAI_HARNESS_MAX_TURNS": ("harness_max_turns", int),
+        "MODAI_COMPACTION_RESERVE_TOKENS": ("compaction_reserve_tokens", int),
     }
     for env_name, (setting_name, convert) in env_map.items():
         value = os.getenv(env_name)

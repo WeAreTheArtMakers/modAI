@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070908">
+  <meta name="description" content="MODAI is a local-first persistent coding and agent harness for Ollama.">
+  <title>MODAI — Local Coding & Agent Harness</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="nav-shell">
+    <nav class="nav" aria-label="Primary navigation">
+      <a class="brand" href="#top" aria-label="MODAI home"><span class="brand-mark">M</span>MODAI</a>
+      <button class="menu" type="button" aria-expanded="false" aria-controls="nav-links" aria-label="Open navigation menu">
+        <span></span><span></span>
+      </button>
+      <div class="nav-links" id="nav-links">
+        <a href="#loop">The loop</a>
+        <a href="#tools">Tools</a>
+        <a href="#privacy">Privacy</a>
+        <a class="nav-cta" href="https://github.com/WeAreTheArtMakers/modAI">View on GitHub</a>
+      </div>
+    </nav>
+  </header>
+
+  <main id="main">
+    <section class="hero" id="top">
+      <div class="hero-copy">
+        <p class="eyebrow"><span></span> Local-first · persistent · verifiable</p>
+        <h1>Give your local model<br><em>a real instrument.</em></h1>
+        <p class="lede">MODAI turns Ollama into a coding harness that reads the project, edits real files, runs quality gates, repairs failures, and stays with the work until the evidence says done.</p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/WeAreTheArtMakers/modAI#quick-start-on-macos">Install MODAI <span>↗</span></a>
+          <a class="button ghost" href="#loop">Hear the workflow <span>↓</span></a>
+        </div>
+        <div class="signal-row" aria-label="Key product properties">
+          <span>Runs on your Mac</span><span>No local token ceiling</span><span>Cloud only by consent</span>
+        </div>
+      </div>
+
+      <div class="terminal" aria-label="Example MODAI terminal session">
+        <div class="terminal-bar"><i></i><i></i><i></i><span>project — modai</span></div>
+        <div class="terminal-body">
+          <p class="prompt"><b>❯</b> modai <span>"Build the landing page and verify it"</span></p>
+          <p class="muted">ROUTE solo · software task</p>
+          <p><strong>Code Virtuoso</strong> · persistent session started</p>
+          <div class="score"><span>ARTIFACTS</span><b>3 / 3</b><i class="fill a"></i></div>
+          <div class="score"><span>GATES</span><b>4 / 4</b><i class="fill b"></i></div>
+          <div class="now"><span class="pulse"></span><div><small>NOW</small><br>Playwright · desktop</div><b>PASS</b></div>
+          <p class="tool">✓ edit <span>styles.css · 2 precise replacements</span></p>
+          <p class="tool">✓ browser_quality <span>mobile · landscape · tablet · desktop</span></p>
+          <p class="done">Objective completed and verified.</p>
+          <p class="tokens">LOCAL 18,420 TOKENS&nbsp;&nbsp; CLOUD 0&nbsp;&nbsp; 3 FILES CHANGED</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="statement" id="loop">
+      <p class="section-label">The persistent loop</p>
+      <h2>Less rehearsal.<br>More working software.</h2>
+      <p>Normal coding no longer needs a committee. One Code Virtuoso holds the context from first inspection through final repair. Deterministic gates—not agent applause—decide when the work is finished.</p>
+      <ol class="loop">
+        <li><b>01</b><span>Inspect</span><small>Targeted reads and project instructions</small></li>
+        <li><b>02</b><span>Perform</span><small>Atomic writes and precise edits</small></li>
+        <li><b>03</b><span>Verify</span><small>Tests, builds, and real browser checks</small></li>
+        <li><b>04</b><span>Repair</span><small>Exact current failure, same session</small></li>
+      </ol>
+    </section>
+
+    <section class="grid-section" id="tools">
+      <div class="section-head">
+        <p class="section-label">A smaller, sharper instrument</p>
+        <h2>Tools made for<br>changing code.</h2>
+      </div>
+      <div class="feature-grid">
+        <article class="feature accent"><span>01</span><h3>Persistent by design</h3><p>Messages, tool results, events, usage, and verification evidence survive interruption in an append-only JSONL session.</p></article>
+        <article class="feature"><span>02</span><h3>Precise edit</h3><p>Exact matches validate together before one byte changes. Ambiguous or overlapping edits fail atomically.</p></article>
+        <article class="feature"><span>03</span><h3>Browser truth</h3><p>Playwright renders mobile, landscape, tablet, and desktop while checking overflow, navigation, console errors, and visible content.</p></article>
+        <article class="feature"><span>04</span><h3>Bounded evidence</h3><p>Long command output stays in a run log. The model receives the useful signal instead of losing context to noise.</p></article>
+        <article class="feature"><span>05</span><h3>One writer</h3><p>The main coder integrates. Optional orchestra delegates are read-only, bounded, and invited only when independent evidence helps.</p></article>
+        <article class="feature"><span>06</span><h3>Safe control</h3><p>Steer, follow up, abort, resume, and compact at stable turn boundaries without interrupting a filesystem mutation.</p></article>
+      </div>
+    </section>
+
+    <section class="privacy" id="privacy">
+      <div>
+        <p class="section-label">Local is the default, not a slogan</p>
+        <h2>Your repository stays<br>in the room.</h2>
+      </div>
+      <div class="privacy-copy">
+        <p>The coding session talks to localhost Ollama. Workspace paths are confined, shell interpolation is absent, destructive Git commands are blocked, and write tools disappear entirely in read-only mode.</p>
+        <p>Cloud models are optional, separately configured, and used only with per-task consent. Local token usage is visible—and unlimited.</p>
+        <code>modai --mode solo "Fix, test, and verify this project"</code>
+      </div>
+    </section>
+
+    <section class="final-cta">
+      <p class="section-label">Ready when the repository is</p>
+      <h2>Start in the directory.<br>Finish with evidence.</h2>
+      <a class="button primary" href="https://github.com/WeAreTheArtMakers/modAI">Get MODAI on GitHub <span>↗</span></a>
+    </section>
+  </main>
+
+  <footer>
+    <a class="brand" href="#top"><span class="brand-mark">M</span>MODAI</a>
+    <p>Built by <a href="https://wearetheartmakers.com">We Are The Art Makers</a>.</p>
+    <p>Local Coding & Agent Harness · 2026</p>
+  </footer>
+  <script src="app.js"></script>
+</body>
+</html>

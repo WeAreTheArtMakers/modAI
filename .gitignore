@@ -13,6 +13,7 @@ config.json
 # Runtime / generated data
 workspace/
 memory/
+.modai/
 
 # macOS
 .DS_Store

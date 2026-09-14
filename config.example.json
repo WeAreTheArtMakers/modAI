@@ -1,13 +1,13 @@
 {
   "model": "mod-agent:latest",
   "host": "http://127.0.0.1:11434",
-  "workspace": "./workspace",
+  "workspace": ".",
   "context_size": 8192,
   "temperature": 0.25,
   "max_agents": 24,
   "max_tool_rounds": 8,
-  "debate_rounds": 2,
-  "repair_rounds": 2,
+  "debate_rounds": 0,
+  "repair_rounds": 4,
   "max_hours": 12,
   "max_total_tokens": 500000,
   "agent_retries": 1,
@@ -25,5 +25,8 @@
   "browser_quality_gate": true,
   "full_orchestra": false,
   "stream_output": true,
-  "visual_review": true
+  "visual_review": true,
+  "harness_mode": "auto",
+  "harness_max_turns": 80,
+  "compaction_reserve_tokens": 2048
 }

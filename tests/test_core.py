@@ -77,6 +77,16 @@ class ConfigTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_settings(path)
 
+    def test_legacy_config_aliases_migrate_safely(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"cloud_token_budget": 2000000, "num_ctx": 16384,
+                                        "mode": "solo", "local_token_limit": None}), encoding="utf-8")
+            settings = load_settings(path)
+        self.assertEqual(settings.cloud_token_budget, 2_000_000)
+        self.assertEqual(settings.context_size, 16384)
+        self.assertEqual(settings.harness_mode, "solo")
+
     def test_boolean_environment_setting(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "missing.json"
@@ -779,7 +789,7 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual([task["role"] for task in state["plan"]["tasks"]], ["coder"])
         self.assertEqual(state["task_cursor"], 0)
         self.assertEqual(state['phase'], 'execute')
-        self.assertEqual(state["version"], "4.2.0")
+        self.assertEqual(state["version"], "5.0.0")
         self.assertEqual(len(state['migration_history']), 1)
 
     def test_resume_allows_legacy_local_run_above_old_token_budget(self) -> None:

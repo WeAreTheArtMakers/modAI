@@ -46,7 +46,7 @@ ROLES: dict[str, RoleSpec] = {
     "product_manager": RoleSpec(
         "Ürün Aranjörü",
         "İhtiyaçları kapsam, kullanıcı hikâyeleri, kabul kriterleri, öncelik ve yol haritasına dönüştür.",
-        WRITE,
+        READ,
         "KAPSAM, KULLANICI HİKÂYELERİ, KABUL KRİTERLERİ, ÖNCELİKLER, KAPSAM DIŞI",
     ),
     "financial_analyst": RoleSpec(
@@ -58,13 +58,13 @@ ROLES: dict[str, RoleSpec] = {
     "operations_manager": RoleSpec(
         "Sahne Yöneticisi",
         "Süreç, sahiplik, kaynak, darboğaz, SLA ve ölçeklenme planı oluştur.",
-        WRITE,
+        READ,
         "SÜREÇ, SORUMLULAR, KAYNAKLAR, DARBOĞAZLAR, KPI, SONRAKİ ADIMLAR",
     ),
     "growth_marketer": RoleSpec(
         "Büyüme Amplifikatörü",
         "Kanal, mesaj, içerik, deney ve ölçüm planını müşteri ve pazar kanıtına bağla.",
-        WEB + ("write_file", "replace_in_file"),
+        WEB,
         "HEDEF KİTLE, MESAJ, KANALLAR, DENEYLER, BÜTÇE, METRİKLER",
     ),
     "sales_strategist": RoleSpec(
@@ -82,7 +82,7 @@ ROLES: dict[str, RoleSpec] = {
     "project_manager": RoleSpec(
         "Tempo Yöneticisi",
         "Bağımlılıkları, kilometre taşlarını, iş sırasını, riskleri ve tamamlanma tanımını yönet.",
-        WRITE,
+        READ,
         "İŞ PLANI, BAĞIMLILIKLAR, KİLOMETRE TAŞLARI, RİSKLER, TAMAMLANMA TANIMI",
     ),
     "researcher": RoleSpec(
@@ -106,7 +106,7 @@ ROLES: dict[str, RoleSpec] = {
     "ux_designer": RoleSpec(
         "Deneyim Aranjörü",
         "Kullanıcı akışı, bilgi mimarisi, erişilebilirlik ve etkileşim davranışlarını tasarla.",
-        WRITE,
+        READ,
         "KULLANICI AKIŞI, EKRANLAR, ETKİLEŞİMLER, ERİŞİLEBİLİRLİK, KABUL KRİTERLERİ",
     ),
     "coder": RoleSpec(
@@ -148,7 +148,7 @@ ROLES: dict[str, RoleSpec] = {
     "integrator": RoleSpec(
         "Baş Aranjör",
         "Uzman çıktıları ve eleştirileri uzlaştır; çelişkileri karara bağla, yalnızca kullanıcı yetki verdiyse dosyaları güncelle.",
-        CODE,
+        AUDIT,
         "KARARLAR, UZLAŞTIRILAN ÇELİŞKİLER, UYGULANAN DÜZELTMELER, KANIT, AÇIK KONULAR",
     ),
 }

@@ -144,11 +144,13 @@ class ProductivityTests(unittest.TestCase):
                 agent.run_task('Build a responsive MODAI landing page')
             state = json.loads(next((root / 'runs').glob('*/state.json')).read_text())
             self.assertEqual(state['status'], 'completed')
-            self.assertEqual([item['role'] for item in state['outputs']], ['coder', 'reviewer'])
-            self.assertEqual(state['tool_trace'][0]['tool'], 'write_file')
-            self.assertTrue(all(call['think'] is False for call in client.calls))
+            self.assertEqual(state['engine'], 'coding-harness')
+            self.assertEqual(state['mode'], 'solo')
+            self.assertEqual(state['changed_paths'], ['index.html'])
+            self.assertEqual(state['verification']['verdict'], 'PASS')
+            self.assertTrue(all(call.get('tools') for call in client.calls))
             self.assertLessEqual(len(client.calls), 8)
-            self.assertTrue(all(len(json.dumps(call['messages']).encode()) < 8192 for call in client.calls))
+            self.assertTrue(all(call['options']['num_ctx'] == 8192 for call in client.calls))
 
     def test_stream_reassembles_tools_content_and_final_usage(self):
         class StreamingClient:

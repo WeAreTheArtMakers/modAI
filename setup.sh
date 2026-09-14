@@ -59,7 +59,7 @@ echo "==> Creating model mod-agent from the selected base..."
 ollama create mod-agent -f "$generated_modelfile"
 
 echo "==> Running local tests..."
-python -m unittest discover -s tests
+python -m pytest -q
 
 echo "==> Installing the global 'modai' command..."
 ./install-command.sh
