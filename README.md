@@ -540,7 +540,8 @@ Version 3.5.1 adds one-prompt local execution and a deterministic static-applica
 gate. Version 3.5 also added simple-code plan consolidation, reserved quality roles, shorter
 research/audit tool loops, bounded calls per round, evidence synthesis at the tool
 boundary, duplicate-call blocking, compact downstream context, and configurable
-model keep-alive.
+model keep-alive. Repeated identical tool events are collapsed into one readable
+terminal line such as `Market Signal Scout: search_web ×3`.
 
 ## Strong-machine parallelism roadmap
 
