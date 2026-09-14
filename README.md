@@ -9,9 +9,15 @@ specialists perform focused parts, the **Counterpoint Critic** challenges weak
 assumptions, the **Lead Arranger** resolves conflicts, and independent quality gates
 decide whether the work is actually finished.
 
-![MODAI Command Center running in an English macOS terminal](docs/images/modai-command-center.png)
-
-<p align="center"><em>The MODAI Command Center: one model, one prompt, a coordinated specialist ensemble.</em></p>
+```text
+  ███╗   ███╗ ██████╗ ██████╗   █████╗ ██╗
+  ████╗ ████║██╔═══██╗██╔══██╗ ██╔══██╗██║
+  ██╔████╔██║██║   ██║██║  ██║ ███████║██║
+  ██║╚██╔╝██║██║   ██║██║  ██║ ██╔══██║██║
+  ██║ ╚═╝ ██║╚██████╔╝██████╔╝ ██║  ██║██║
+  ╚═╝     ╚═╝ ╚═════╝ ╚═════╝  ╚═╝  ╚═╝╚═╝
+  LOCAL AGENT ORCHESTRATION
+```
 
 ```text
 Your task
@@ -31,8 +37,8 @@ The default path is entirely local. Public research packages can optionally use 
 OpenAI, Anthropic, or Google API model, but only after explicit per-task consent.
 Potential secrets remain on the local route.
 
-> Current development release: **3.5.1**. The repository README is published before
-> the application source while local validation is in progress.
+> Current release: **4.0.0** — artifact contracts, Chromium quality gates, shared
+> evidence, adaptive read-only parallelism, smart stopping, and live score telemetry.
 
 ## Why MODAI
 
@@ -91,6 +97,7 @@ entire agent capacity on duplicate reviewers or prematurely claim a quality pass
 
 - macOS or Linux
 - Python 3.10 or newer with `venv`, `pip`, and `pyexpat`
+- Node.js is recommended for deterministic JavaScript syntax checks
 - [Ollama](https://ollama.com/download), running locally
 - About 10 GB of free disk space for the recommended 9B setup
 - Optional: internet access for web research
@@ -104,9 +111,10 @@ cd modAI
 ./setup.sh
 ```
 
-`setup.sh` checks Ollama and Python, creates a private `.venv`, analyzes hardware,
-selects and downloads a local model, builds `mod-agent`, runs tests, and installs the
-global `modai` launcher in `~/.local/bin`.
+`setup.sh` checks Ollama and Python, creates a private `.venv`, installs the matching
+Playwright Chromium build, analyzes hardware, downloads a suitable local model,
+builds `mod-agent`, runs all tests, and installs the global `modai` launcher in
+`~/.local/bin`.
 
 If that directory is not on `PATH`, add it once:
 
@@ -219,7 +227,9 @@ modai --num-ctx 16384 "Inspect, repair, and test this project"
   "temperature": 0.25,
   "max_tool_rounds": 8,
   "keep_alive": "5m",
-  "think": false
+  "think": false,
+  "execution_mode": "adaptive",
+  "max_parallel_agents": 0
 }
 ```
 
@@ -252,6 +262,14 @@ Choose **Orchestration profile → Edit custom settings** to edit:
 | `cloud_token_budget` | 500,000 | 1,000–1,000,000,000 | Paid API cost guard only |
 | `max_tool_rounds` | 8 | 1–50 | Configured ceiling per agent |
 | `agent_retries` | 1 | 0–10 | Retry count for failed agent steps |
+| `max_parallel_agents` | 0 | 0–8 | Read-only parallel worker cap; `0` uses hardware advice |
+
+The editor also exposes `execution_mode`: `sequential`, `adaptive`, or `parallel`.
+Adaptive mode deliberately resolves to one local request on a 16 GB M1 Pro. On
+higher-memory machines it schedules dependency-ready read-only parts concurrently.
+In a clean Git repository, independent writers use disposable worktrees and return
+patches to one serialized Lead Arranger merge queue. Dirty or non-Git workspaces
+automatically keep writers serial.
 
 Research and audit roles use a smaller internal tool-loop ceiling even when the
 profile allows more. This prevents repeated `search_web`/`read_file` calls from
@@ -367,6 +385,8 @@ modai --recommend-model
 | `--repair-rounds N` | Failed-gate repair rounds, 0–20 |
 | `--max-tool-rounds N` | Configured per-agent tool ceiling, 1–50 |
 | `--agent-retries N` | Failed-step retries, 0–10 |
+| `--execution-mode sequential\|adaptive\|parallel` | Scheduling policy |
+| `--max-parallel-agents N` | Concurrent read-only cap, 0–8; `0` is automatic |
 | `--max-hours HOURS` | Active processing guard, 0.1–168 |
 | `--num-ctx N`, `--context-size N` | Ollama context, 2048–131072 |
 | `--cloud-token-budget N` | Paid API guard, 1,000–1,000,000,000 |
@@ -404,6 +424,7 @@ modai --recommend-model
 | `/set agent_retries N` | Change step retries |
 | `/set max_hours N` | Change active-time guard |
 | `/set cloud_token_budget N` | Change paid-provider guard |
+| `/set max_parallel_agents N` | Set the read-only worker cap; `0` uses hardware advice |
 | `/cloud` | Show cloud policy and status |
 | `/cloud setup` | Configure provider/model/key |
 | `/cloud off` | Persistently disable cloud use |
@@ -419,8 +440,9 @@ Text that does not begin with `/` starts a local task.
 
 ## Configuration and environment
 
-`config.json` contains defaults. CLI flags override environment variables, and
-environment variables override the file.
+`setup.sh` copies the tracked `config.example.json` to the local, Git-ignored
+`config.json` when needed. CLI flags override environment variables, and environment
+variables override the file.
 
 ```json
 {
@@ -443,7 +465,11 @@ environment variables override the file.
   "cloud_enabled": false,
   "cloud_provider": "openai",
   "cloud_model": "",
-  "cloud_roles": "market_researcher,competitor_analyst,growth_marketer"
+  "cloud_roles": "market_researcher,competitor_analyst,growth_marketer",
+  "execution_mode": "adaptive",
+  "max_parallel_agents": 0,
+  "evidence_cache_entries": 128,
+  "browser_quality_gate": true
 }
 ```
 
@@ -473,27 +499,39 @@ The stored `max_total_tokens` key is retained for compatibility; since 3.5 it me
 | `MODAI_CLOUD_PROVIDER` | `cloud_provider` |
 | `MODAI_CLOUD_MODEL` | `cloud_model` |
 | `MODAI_CLOUD_ROLES` | comma-separated allowlist |
+| `MODAI_EXECUTION_MODE` | `sequential`, `adaptive`, or `parallel` |
+| `MODAI_MAX_PARALLEL_AGENTS` | read-only worker cap; `0` is automatic |
+| `MODAI_EVIDENCE_CACHE_ENTRIES` | run-local evidence cache capacity |
+| `MODAI_BROWSER_QUALITY_GATE` | enable/disable local Chromium gate |
 
 The Ollama host is intentionally restricted to localhost.
 
 ## How a run completes
 
-1. The Orchestra Conductor writes a bounded dependency plan.
-2. Reserved quality roles are removed from planner-created packages.
-3. Simple software work is consolidated into one Code Virtuoso part.
-4. Each specialist receives only the tools required by its role and mode.
-5. Tool evidence and token counters are checkpointed.
-6. Counterpoint debate runs when configured.
-7. Relevant quality gates inspect the actual workspace.
-8. Failed gates trigger bounded repair and revalidation.
-9. The run completes only when the latest required gates pass.
+1. The Orchestra Conductor turns the prompt into a bounded dependency score and an
+   artifact contract: expected files, explicit test commands, machine checks, and
+   research evidence requirements.
+2. Simple software work is consolidated into one Code Virtuoso part; quality roles
+   remain independent and cannot be consumed by the planner.
+3. Dependency-ready specialists work with role-scoped tools. Shared file/URL evidence
+   is reused by content hash and workspace revision instead of reread into context.
+4. If an agent repeats tools without producing new evidence for two rounds, the
+   Conductor stops that part and hands its evidence to the Lead Arranger.
+5. Counterpoint debate runs only as configured, followed by reviewer, tester,
+   security, and research gates relevant to the work.
+6. Static sites pass both deterministic source checks and a real local Chromium
+   render at mobile, landscape, tablet, and desktop sizes.
+7. A failed or missing contract item triggers repair and revalidation. A model-written
+   `PASS` can never override a machine `FAIL`.
+8. Final synthesis begins only after the current artifact, research, and quality
+   states have been checkpointed.
 
-For static sites, `validate_static_site` now runs as a deterministic machine gate
-before model reviewers. It verifies referenced assets, responsive viewport metadata,
-non-empty titles, duplicate IDs, image alt text, CSS brace balance, and JavaScript
-syntax through local Node.js when available. A machine `FAIL` overrides an invented
-model `PASS` and forces the repair loop. `validate_web_assets` remains available for
-focused local-reference checks.
+`validate_static_site` checks referenced assets, viewport metadata, title, duplicate
+IDs, image alt text, CSS brace balance, and JavaScript syntax through local Node.js.
+`validate_browser_quality` serves the workspace only on `127.0.0.1`, saves four
+screenshots under `.modai/browser/`, and rejects horizontal overflow, JavaScript or
+console errors, broken in-page navigation, failed HTTP navigation, and pages with no
+visible content.
 
 ## Checkpoints and recovery
 
@@ -503,16 +541,16 @@ memory/runs/<RUN_ID>/
 └── final.txt
 ```
 
-The checkpoint records phase, cursors, outputs, tool evidence, duration, total usage,
-separate cloud usage, routing consent, and extended cloud budget. Updates use atomic
-temporary-file replacement.
+The checkpoint records phase, cursors, artifact/research contracts, shared evidence
+cache, outputs, tool evidence, per-agent and total usage, efficiency, routing consent,
+and extended cloud budget. Updates use atomic temporary-file replacement.
 
 ```bash
 modai --resume                 # latest unfinished run
 modai --resume RUN_ID          # a specific run
 ```
 
-Runs paused by the old all-token budget can be resumed normally in 3.5. Historical
+Runs paused by the old all-token budget can be resumed normally in 4.0. Historical
 local token use no longer blocks startup.
 
 ## Security boundaries
@@ -526,6 +564,7 @@ local token use no longer blocks startup.
 - Obvious keys, passwords, tokens, and private keys force local routing.
 - macOS API keys are stored in Keychain, never `config.json`.
 - Tool calls, writes, commands, and verdicts stay auditable.
+- The visual gate binds its temporary server to loopback and never publishes the site.
 
 No automated detector identifies every secret. Do not approve hybrid routing when the
 public/private boundary is ambiguous.
@@ -536,36 +575,34 @@ Logical agents are not separately loaded models. On the default M1 Pro setup, ro
 run sequentially against one local model. This prevents concurrent generations from
 multiplying KV-cache/context pressure on 16 GB memory.
 
-Version 3.5.1 adds one-prompt local execution and a deterministic static-application
-gate. Version 3.5 also added simple-code plan consolidation, reserved quality roles, shorter
-research/audit tool loops, bounded calls per round, evidence synthesis at the tool
-boundary, duplicate-call blocking, compact downstream context, and configurable
-model keep-alive. Repeated identical tool events are collapsed into one readable
-terminal line such as `Market Signal Scout: search_web ×3`.
+Adaptive scheduling uses the hardware probe: less than 24 GB stays at one request,
+24–47 GB permits two independent read-only parts, and larger systems permit up to
+four by default. Roles without file writes or terminal execution use shared-workspace
+read-only batches. In a clean Git repository, independent writer parts receive
+disposable detached worktrees; their binary-capable patches are conflict-checked in a
+temporary integration tree and then applied by one plan-ordered Lead Arranger merge
+queue. Dirty and non-Git projects fall back to serial writers without touching user
+changes.
 
-## Strong-machine parallelism roadmap
+The live score keeps progress readable without streaming every internal thought:
 
-True parallel execution is not enabled in this release. Starting several writers in
-one workspace would create races and may worsen Ollama memory pressure. The safe plan
-for higher-memory Macs and GPU servers is:
+```text
+♫ SCORE  3/7
+  NOW    Code Virtuoso · applying CSS repair
+  NEXT   Test Percussionist
+  GATES  index.html PASS · static_site PASS · browser_quality pending
+  TOKENS 42,810 local · 0 cloud · FILES 4 · EFF 1.64/10k
+```
 
-1. `execution_mode: sequential | adaptive | parallel`;
-2. a bounded `max_concurrent_agents` pool sized from available memory;
-3. dependency-DAG scheduling for ready nodes;
-4. isolated worktrees or per-task staging for writers;
-5. one Lead Arranger merge queue with conflict detection;
-6. shared read-only evidence caching and request deduplication;
-7. per-worker context accounting and memory-pressure backoff;
-8. automatic sequential fallback.
-
-The 16 GB default should remain sequential; stronger hardware should enter adaptive
-mode only after a startup probe.
+`EFF` is verified contract items plus passed quality gates per 10,000 tokens. The run
+state also records per-agent input/output usage, changed-file count, and cache hits.
+Repeated identical terminal tool events collapse into a single `×N` line.
 
 ## Troubleshooting
 
 ### A local run says the token budget was exceeded
 
-That process was started with pre-3.5 code already loaded. Let it checkpoint, launch
+That process was started with pre-4.0 code already loaded. Let it checkpoint, launch
 a new process, and resume:
 
 ```bash
@@ -576,7 +613,7 @@ Do not raise `--max-total-tokens` for local work; it now concerns cloud only.
 
 ### Token use grows rapidly on a simple task
 
-- Start a fresh 3.5 run so compact planning is applied.
+- Start a fresh 4.0 run so contracts, caching, and smart stopping are applied.
 - Prefer `fast` or `balanced` unless debate is genuinely useful.
 - Keep `num_ctx` at 8192 on a 16 GB M1 Pro.
 - Put concrete files and acceptance criteria in one prompt.
@@ -615,18 +652,20 @@ limits, and API key. Disable routing with `/cloud off` when needed.
 ```bash
 source .venv/bin/activate
 python -m unittest discover -s tests -v
-python -m py_compile orchestrator.py config.py roles.py tui.py
+python -m py_compile orchestrator.py config.py contracts.py evidence_cache.py roles.py tui.py tools/browser_gate.py
 ```
 
-The suite covers terminal navigation, prompt editing and paste safety, workspace
-confinement, command validation, model advice, tool protocols, cloud routing, local
-unlimited-token semantics, cloud-budget extension, checkpoint resume, plan capacity,
-valid and deliberately broken static applications, web asset validation, and
+The 67-test suite covers terminal navigation, prompt editing and paste safety,
+workspace confinement, command validation, model advice, tool protocols, cloud
+routing, unlimited local-token semantics, cloud-budget extension, checkpoint resume,
+artifact contracts, evidence-cache invalidation, smart stopping, live score fields,
+valid and deliberately broken static applications, four real browser viewports, and
 machine-over-model quality-gate behavior.
 
 ## Current limitations
 
-- Local specialists are sequential in 3.5; adaptive workers remain a roadmap item.
+- Parallel writer worktrees require a clean Git checkout; dirty or non-Git projects
+  deliberately use the serial writer queue.
 - Hybrid providers use API keys, not consumer-subscription login.
 - Cloud packages do not receive local tools or project files by design.
 - Token counts are telemetry, not a currency estimate.
@@ -636,26 +675,14 @@ machine-over-model quality-gate behavior.
 
 ## Suggested next milestones
 
-1. **Artifact contracts:** infer expected files and tests from the prompt before work,
-   then block finalization until each artifact has machine evidence.
-2. **Adaptive DAG scheduling:** use isolated writer worktrees and a single merge queue
-   on high-memory machines, while keeping 16 GB systems sequential.
-3. **Evidence cache:** content-address file reads, commands, and fetched sources so
-   multiple agents reuse verified evidence instead of spending context repeatedly.
-4. **Live run inspector:** show current score position, agent/tool budgets, changed
-   files, failing gates, and resume checkpoints without flooding terminal output.
-5. **Visual browser gate:** add optional local Playwright screenshots at mobile,
-   landscape, tablet, and desktop sizes with console-error and overflow detection.
-6. **Research source policy:** prefer primary sources, track publication dates, detect
-   duplicate claims, and require citations for every externally verifiable conclusion.
-7. **Prompt presets without forms:** support concise inline intents such as `build`,
-   `research`, `audit`, and `repair`, while preserving the one-prompt interaction.
-8. **Efficiency telemetry:** report useful artifacts and passed gates per 10k tokens,
-   then automatically shorten or stop unproductive agent loops.
-9. **Provider cost estimates:** display optional currency estimates separately from
-   token limits and provider quota.
-10. **Signed profile exchange:** import and export reviewed orchestration profiles
-    without allowing prompt files to silently broaden tool permissions.
+1. **Provider cost estimates:** optional currency estimates kept separate from token
+   telemetry and provider quota.
+2. **OAuth adapters:** supported account-login integrations only where provider terms
+   and APIs explicitly permit them.
+3. **Signed profile exchange:** import/export reviewed orchestration profiles without
+   allowing prompt files to broaden tool permissions.
+4. **Visual regression baselines:** optional pixel-diff history on top of the current
+   structural browser gate.
 
 ## License
 

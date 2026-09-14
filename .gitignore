@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+memory/*.json
+memory/*.txt
+memory/runs/
+.DS_Store
+config.json
+.modai/
