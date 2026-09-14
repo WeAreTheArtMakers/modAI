@@ -686,4 +686,4 @@ machine-over-model quality-gate behavior.
 
 ## License
 
-Add the chosen license before distributing MODAI publicly.
+WATAM
