@@ -9,6 +9,10 @@ specialists perform focused parts, the **Counterpoint Critic** challenges weak
 assumptions, the **Lead Arranger** resolves conflicts, and independent quality gates
 decide whether the work is actually finished.
 
+![MODAI Command Center running in an English macOS terminal](docs/images/modai-command-center.png)
+
+<p align="center"><em>The MODAI Command Center: one model, one prompt, a coordinated specialist ensemble.</em></p>
+
 ```text
 Your task
    ↓
@@ -27,7 +31,7 @@ The default path is entirely local. Public research packages can optionally use 
 OpenAI, Anthropic, or Google API model, but only after explicit per-task consent.
 Potential secrets remain on the local route.
 
-> Current development release: **3.5.0**. The repository README is published before
+> Current development release: **3.5.1**. The repository README is published before
 > the application source while local validation is in progress.
 
 ## Why MODAI
@@ -43,7 +47,7 @@ Potential secrets remain on the local route.
   memory on 16 GB machines while logical roles provide focused instructions and
   tools.
 - **Real tools, real evidence:** agents inspect files, apply changes, run allowlisted
-  commands, validate web assets, review diffs, and checkpoint results.
+  commands, validate complete static applications, review diffs, and checkpoint results.
 - **Quality gates:** software work is not marked complete while reviewer, tester, or
   security gates still report `VERDICT: FAIL`.
 - **Long-running work:** every meaningful step is written to a run directory and can
@@ -156,6 +160,11 @@ FOLDER /path/to/project
 TEAM   up to 24 logical agents · one model · internet on
 CLOUD  off (local default)
 ```
+
+Choose **Start a new task**, write one prompt, and press Enter. MODAI immediately
+starts a local-first run; there is no second work-mode or routing questionnaire. A
+prompt containing an explicit read-only instruction automatically removes write
+tools. Advanced cloud work remains deliberate through `/hybrid` or `--allow-cloud`.
 
 Navigation:
 
@@ -479,8 +488,12 @@ The Ollama host is intentionally restricted to localhost.
 8. Failed gates trigger bounded repair and revalidation.
 9. The run completes only when the latest required gates pass.
 
-For static sites, `validate_web_assets` checks local `src`, `href`, and CSS `url(...)`
-references. Missing referenced files fail; empty unreferenced directories do not.
+For static sites, `validate_static_site` now runs as a deterministic machine gate
+before model reviewers. It verifies referenced assets, responsive viewport metadata,
+non-empty titles, duplicate IDs, image alt text, CSS brace balance, and JavaScript
+syntax through local Node.js when available. A machine `FAIL` overrides an invented
+model `PASS` and forces the repair loop. `validate_web_assets` remains available for
+focused local-reference checks.
 
 ## Checkpoints and recovery
 
@@ -523,7 +536,8 @@ Logical agents are not separately loaded models. On the default M1 Pro setup, ro
 run sequentially against one local model. This prevents concurrent generations from
 multiplying KV-cache/context pressure on 16 GB memory.
 
-Version 3.5 adds simple-code plan consolidation, reserved quality roles, shorter
+Version 3.5.1 adds one-prompt local execution and a deterministic static-application
+gate. Version 3.5 also added simple-code plan consolidation, reserved quality roles, shorter
 research/audit tool loops, bounded calls per round, evidence synthesis at the tool
 boundary, duplicate-call blocking, compact downstream context, and configurable
 model keep-alive.
@@ -606,7 +620,8 @@ python -m py_compile orchestrator.py config.py roles.py tui.py
 The suite covers terminal navigation, prompt editing and paste safety, workspace
 confinement, command validation, model advice, tool protocols, cloud routing, local
 unlimited-token semantics, cloud-budget extension, checkpoint resume, plan capacity,
-web asset validation, and quality-gate behavior.
+valid and deliberately broken static applications, web asset validation, and
+machine-over-model quality-gate behavior.
 
 ## Current limitations
 
@@ -620,13 +635,26 @@ web asset validation, and quality-gate behavior.
 
 ## Suggested next milestones
 
-1. Adaptive DAG scheduling with isolated writer worktrees.
-2. Content-addressed evidence caching across roles and resumed runs.
-3. Per-role token/time envelopes and a live efficiency score.
-4. A TUI run inspector for gate verdicts, changed files, and checkpoints.
-5. Playwright static-site visual/regression checks when installed locally.
-6. Provider pricing tables and optional currency estimates.
-7. Signed import/export for orchestration profiles.
+1. **Artifact contracts:** infer expected files and tests from the prompt before work,
+   then block finalization until each artifact has machine evidence.
+2. **Adaptive DAG scheduling:** use isolated writer worktrees and a single merge queue
+   on high-memory machines, while keeping 16 GB systems sequential.
+3. **Evidence cache:** content-address file reads, commands, and fetched sources so
+   multiple agents reuse verified evidence instead of spending context repeatedly.
+4. **Live run inspector:** show current score position, agent/tool budgets, changed
+   files, failing gates, and resume checkpoints without flooding terminal output.
+5. **Visual browser gate:** add optional local Playwright screenshots at mobile,
+   landscape, tablet, and desktop sizes with console-error and overflow detection.
+6. **Research source policy:** prefer primary sources, track publication dates, detect
+   duplicate claims, and require citations for every externally verifiable conclusion.
+7. **Prompt presets without forms:** support concise inline intents such as `build`,
+   `research`, `audit`, and `repair`, while preserving the one-prompt interaction.
+8. **Efficiency telemetry:** report useful artifacts and passed gates per 10k tokens,
+   then automatically shorten or stop unproductive agent loops.
+9. **Provider cost estimates:** display optional currency estimates separately from
+   token limits and provider quota.
+10. **Signed profile exchange:** import and export reviewed orchestration profiles
+    without allowing prompt files to silently broaden tool permissions.
 
 ## License
 
