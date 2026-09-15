@@ -357,7 +357,11 @@ class Orchestrator:
         if client is None:
             if Client is None:
                 raise RuntimeError("Ollama Python paketi yok. Önce ./setup.sh çalıştırın.")
-            client = Client(host=settings.host, trust_env=False, timeout=600.0)
+            client = Client(host=settings.host, trust_env=False,
+                            timeout=settings.model_timeout_seconds)
+            self._owns_client = True
+        else:
+            self._owns_client = False
         self.settings = settings
         self.client = client
         self.cloud_client = (
@@ -1126,11 +1130,26 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         return self._continue(run_dir, state)
 
     def _harness_runtime(self) -> OllamaRuntime:
+        # Pass model_timeout_seconds to the underlying Ollama client so that
+        # the harness timeout aligns with the configured value instead of
+        # relying on the global Client timeout set at construction time.
+        timed_client = self.client
+        if self._owns_client:
+            self.client._client.timeout = self.settings.model_timeout_seconds
         return OllamaRuntime(
-            self.client, self.settings.model,
-            options={"num_ctx": self.settings.context_size, "temperature": self.settings.temperature,
-                     "top_p": 0.9, "top_k": 20},
-            keep_alive=self.settings.keep_alive, stream=self.settings.stream_output,
+            timed_client, self.settings.model,
+            options={
+                "num_ctx": self.settings.context_size,
+                "temperature": self.settings.temperature,
+                "top_p": 0.9,
+                "top_k": 20,
+                "num_predict": self.settings.model_max_output_tokens,
+                # think is extracted from options inside OllamaRuntime.generate()
+                # and forwarded as a top-level kwarg to the Ollama client.
+                "think": self.settings.think,
+            },
+            keep_alive=self.settings.keep_alive,
+            stream=self.settings.stream_output,
         )
 
     def _harness_event(self, run_dir: Path, state: dict[str, Any], event: Any) -> None:
@@ -1143,6 +1162,13 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
                 f"Kod Virtüözü çalışıyor · tur {data.get('turn')}",
                 f"Code Virtuoso is working · turn {data.get('turn')}",
             ))
+        elif event.kind == "model_retry":
+            self.event("warn", self.t(
+                f"Yerel model yanıt vermedi; kontrol noktası korundu · yeniden deneme {data.get('attempt')}/{data.get('maximum')}",
+                f"Local model did not respond; checkpoint preserved · retry {data.get('attempt')}/{data.get('maximum')}",
+            ))
+        elif event.kind == "model_failed":
+            self.event("warn", self.t("Yerel model isteği tamamlanamadı", "Local model request did not complete"))
         elif event.kind == "tool_started":
             self.event("tool", f"Code Virtuoso: {data.get('name')}")
         elif event.kind == "tool_finished":
@@ -1188,6 +1214,11 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
                                       "No-progress guard requested a concrete file change"))
         elif event.kind == "context_compacted":
             self.event("detail", self.t("Bağlam güvenle sıkıştırıldı", "Context compacted safely"))
+        elif event.kind == "redundant_tool_batch_rejected":
+            self.event("detail", self.t(
+                "Kalite kapıları geçti; gereksiz yeni araç çağrısı çalıştırılmadı",
+                "Quality gates passed; a redundant tool call was not executed",
+            ))
         state["updated_at"] = datetime.now().isoformat(timespec="seconds")
         if material_change or event.kind in {"usage", "verification_finished", "harness_finished"}:
             self._save_state(run_dir, state)
@@ -1254,6 +1285,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             compaction_reserve_tokens=self.settings.compaction_reserve_tokens,
             repair_rounds=self.settings.repair_rounds,
             max_turns=self.settings.harness_max_turns,
+            model_retries=self.settings.model_retries,
             delegate_enabled=state.get("mode") == "orchestra",
             delegate_runtime=delegate_runtime,
             network_enabled=self.settings.internet_enabled,
@@ -2432,7 +2464,7 @@ HELP_TR = """Komutlar:
   /workspace PATH          Çalışma klasörünü değiştir
   /internet on|off         İnternet araştırmasını aç/kapat
   /profile PROFİL          fast|balanced|deep|marathon
-  /set AYAR DEĞER          num_ctx|temperature|max_agents|debate_rounds|repair_rounds|max_hours|cloud_token_budget|max_tool_rounds|agent_retries|max_parallel_agents
+  /set AYAR DEĞER          num_ctx|temperature|model_timeout|model_retries|model_max_output|max_agents|debate_rounds|repair_rounds|max_hours|cloud_token_budget|max_tool_rounds|agent_retries|max_parallel_agents
   /cloud                   Bulut yapılandırma durumunu göster
   /cloud off               Bulut kullanımını kapat
   /cloud setup             API sağlayıcısını macOS Keychain ile yapılandır
@@ -2458,7 +2490,7 @@ HELP_EN = """Commands:
   /workspace PATH          Change working directory
   /internet on|off         Enable/disable internet research
   /profile PROFILE         fast|balanced|deep|marathon
-  /set SETTING VALUE       num_ctx|temperature|max_agents|debate_rounds|repair_rounds|max_hours|cloud_token_budget|max_tool_rounds|agent_retries|max_parallel_agents
+  /set SETTING VALUE       num_ctx|temperature|model_timeout|model_retries|model_max_output|max_agents|debate_rounds|repair_rounds|max_hours|cloud_token_budget|max_tool_rounds|agent_retries|max_parallel_agents
   /cloud                   Show cloud configuration status
   /cloud off               Disable cloud use
   /cloud setup             Configure an API provider using macOS Keychain
@@ -2493,18 +2525,24 @@ EDITABLE_SETTINGS: dict[str, tuple[type, float, float]] = {
 SETTING_ALIASES = {
     "num_ctx": "context_size",
     "cloud_token_budget": "max_total_tokens",
+    "model_timeout": "model_timeout_seconds",
+    "model_max_output": "model_max_output_tokens",
 }
 DIRECT_SETTINGS: dict[str, tuple[type, float, float]] = {
     **EDITABLE_SETTINGS,
     "context_size": (int, 2048, 131072),
     "temperature": (float, 0, 2),
+    "model_timeout_seconds": (float, 60, 3600),
+    "model_retries": (int, 0, 5),
+    "model_max_output_tokens": (int, 256, 8192),
 }
 
 
 def set_orchestration_value(orchestrator: Orchestrator, name: str, raw_value: str) -> None:
     canonical = SETTING_ALIASES.get(name, name)
     if canonical not in DIRECT_SETTINGS:
-        visible = ["num_ctx", "temperature", *EDITABLE_SETTINGS]
+        visible = ["num_ctx", "temperature", "model_timeout", "model_retries",
+                   "model_max_output", *EDITABLE_SETTINGS]
         visible[visible.index("max_total_tokens")] = "cloud_token_budget"
         raise ValueError("Ayar: " + ", ".join(visible))
     converter, minimum, maximum = DIRECT_SETTINGS[canonical]
@@ -2527,6 +2565,9 @@ def edit_model_parameters(orchestrator: Orchestrator, ui: TerminalUI, dashboard:
         "temperature": orchestrator.settings.temperature,
         "keep_alive": orchestrator.settings.keep_alive,
         "think": orchestrator.settings.think,
+        "model_timeout_seconds": orchestrator.settings.model_timeout_seconds,
+        "model_retries": orchestrator.settings.model_retries,
+        "model_max_output_tokens": orchestrator.settings.model_max_output_tokens,
     }
     try:
         raw = input(f"num_ctx [{orchestrator.settings.context_size}] (2048–131072) › ").strip()
@@ -2535,6 +2576,15 @@ def edit_model_parameters(orchestrator: Orchestrator, ui: TerminalUI, dashboard:
         raw = input(f"temperature [{orchestrator.settings.temperature:g}] (0–2) › ").strip()
         if raw:
             set_orchestration_value(orchestrator, "temperature", raw)
+        raw = input(f"model_timeout [{orchestrator.settings.model_timeout_seconds:g}] seconds (60–3600) › ").strip()
+        if raw:
+            set_orchestration_value(orchestrator, "model_timeout", raw)
+        raw = input(f"model_retries [{orchestrator.settings.model_retries}] (0–5) › ").strip()
+        if raw:
+            set_orchestration_value(orchestrator, "model_retries", raw)
+        raw = input(f"model_max_output [{orchestrator.settings.model_max_output_tokens}] (256–8192) › ").strip()
+        if raw:
+            set_orchestration_value(orchestrator, "model_max_output", raw)
         raw = input(f"keep_alive [{orchestrator.settings.keep_alive}] (e.g. 5m, 30m, -1) › ").strip()
         if raw:
             if not re.fullmatch(r"-1|0|\d+(?:\.\d+)?(?:ms|s|m|h)", raw):
@@ -2554,6 +2604,9 @@ def edit_model_parameters(orchestrator: Orchestrator, ui: TerminalUI, dashboard:
                 "temperature": orchestrator.settings.temperature,
                 "keep_alive": orchestrator.settings.keep_alive,
                 "think": orchestrator.settings.think,
+                "model_timeout_seconds": orchestrator.settings.model_timeout_seconds,
+                "model_retries": orchestrator.settings.model_retries,
+                "model_max_output_tokens": orchestrator.settings.model_max_output_tokens,
             })
             temporary = DEFAULT_CONFIG.with_suffix(".json.tmp")
             temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -2835,15 +2888,18 @@ def dashboard_loop(orchestrator: Orchestrator, ui: TerminalUI, dashboard: Dashbo
                 dashboard.clear()
                 try:
                     ui.event("ok", tx(
-                        "Tek-prompt yerel çalışma başladı · yazma yetkisi prompttan güvenle çıkarılıyor",
-                        "One-prompt local run started · write permission is safely inferred from the prompt",
+                        "Tek-prompt yerel çalışma başladı · yazma yetkisi: açık",
+                        "One-prompt local run started · write permission: enabled",
                     ))
-                    ui.final(orchestrator.run_task(task, write_allowed=None, allow_cloud=False))
+                    ui.final(orchestrator.run_task(task, write_allowed=True, allow_cloud=False))
                 except (RuntimeError, ValueError, TimeoutError) as exc:
                     ui.event("error", str(exc))
                 except KeyboardInterrupt:
                     print()
-                input(ui.style("\n" + tx("Ana menü için Enter", "Press Enter for the main menu"), "dim"))
+                dashboard.message(
+                    tx("TAMAMLANDI", "COMPLETED"),
+                    [tx("Ana menüye dönmek için Enter'a basın.", "Press Enter to return to the main menu.")],
+                )
         elif choice == 1:
             selected = dashboard.select_directory(get_workspace())
             if selected:
@@ -2866,7 +2922,10 @@ def dashboard_loop(orchestrator: Orchestrator, ui: TerminalUI, dashboard: Dashbo
                     ui.event("error", str(exc))
                 except KeyboardInterrupt:
                     print()
-                input(ui.style("\n" + tx("Ana menü için Enter", "Press Enter for the main menu"), "dim"))
+                dashboard.message(
+                    tx("TAMAMLANDI", "COMPLETED"),
+                    [tx("Ana menüye dönmek için Enter'a basın.", "Press Enter to return to the main menu.")],
+                )
         elif choice == 3:
             try:
                 models = orchestrator.model_names()
@@ -2980,6 +3039,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Yalnızca ücretli bulut çağrıları için maliyet koruması (1000-1000000000); yerel kullanım sınırsızdır",
     )
     parser.add_argument("--num-ctx", "--context-size", dest="context_size", type=int, help="Ollama num_ctx bağlamı (2048-131072)")
+    parser.add_argument("--model-timeout", dest="model_timeout_seconds", type=float, help="Yerel model istek zaman aşımı, saniye (60-3600)")
+    parser.add_argument("--model-retries", type=int, help="Geçici yerel model hatası yeniden denemesi (0-5)")
+    parser.add_argument("--model-max-output", dest="model_max_output_tokens", type=int, help="Tek yerel yanıt üretim sınırı (256-8192)")
     parser.add_argument("--debate-rounds", type=int, help="Legacy full-orchestra debate rounds (0-20)")
     parser.add_argument("--repair-rounds", type=int, help="Düzeltme turu (0-20)")
     parser.add_argument("--max-tool-rounds", type=int, help="Legacy per-agent tool rounds (1-50)")
@@ -3028,7 +3090,8 @@ def main(argv: list[str] | None = None) -> int:
         for name in (
             "max_agents", "max_hours", "max_total_tokens", "context_size", "debate_rounds",
             "repair_rounds", "max_tool_rounds", "agent_retries",
-            "max_parallel_agents",
+            "max_parallel_agents", "model_timeout_seconds", "model_retries",
+            "model_max_output_tokens",
         ):
             value = getattr(args, name)
             if value is not None:

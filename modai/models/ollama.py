@@ -60,18 +60,39 @@ class OllamaRuntime:
                         int(_value(raw, "eval_count", 0) or 0)),
             stop_reason=reason,
             truncated=reason in {"length", "max_tokens"},
+            thinking=str(_value(message, "thinking", "") or ""),
         )
 
-    def generate(self, messages, tools, *, on_text=None) -> ModelResponse:
-        kwargs = {
+    def generate(self, messages, tools, *, on_text=None,
+                 max_output_tokens: int | None = None,
+                 _reduced_context: bool = False) -> ModelResponse:
+        options = dict(self.options)
+        if max_output_tokens is not None:
+            options["num_predict"] = max(1, int(max_output_tokens))
+        # Ollama accepts `think` as a top-level kwarg, not inside options.
+        # Extract it from options so it is passed correctly and never causes
+        # an unrecognised-key error on older Ollama builds.
+        think = bool(options.pop("think", False))
+        # On retry with reduced context, cap num_ctx to 8192 to recover from timeouts.
+        if _reduced_context:
+            options["num_ctx"] = min(options.get("num_ctx", 8192), 8192)
+            think = False
+        kwargs: dict[str, Any] = {
             "model": self.model,
             "messages": messages,
             "tools": tools,
-            "options": self.options,
+            "options": options,
             "keep_alive": self.keep_alive,
+            "think": think,
         }
+        if self.stream:
+            kwargs["stream"] = True
         try:
-            raw = self.client.chat(**kwargs, **({"stream": True} if self.stream else {}))
+            raw = self.client.chat(**kwargs)
+        except TypeError as exc:
+            if "think" in str(exc):
+                raise RuntimeError("Ollama client cannot propagate think; upgrade ollama-python and run modai doctor") from exc
+            raise
         except Exception as exc:
             # Compatibility path for older/local servers that reject native tool
             # schemas. The harness still validates the decoded call normally.
@@ -83,16 +104,19 @@ class OllamaRuntime:
                 "Native tools are unavailable. For one tool call only, return strict JSON "
                 '{"tool":"name","args":{...}}. Available schemas: ' + json.dumps(tools, ensure_ascii=False)
             )})
-            raw = self.client.chat(model=self.model, messages=fallback, options=self.options,
-                                   keep_alive=self.keep_alive)
+            raw = self.client.chat(model=self.model, messages=fallback, options=options,
+                                   keep_alive=self.keep_alive, think=think)
         if not self.stream or isinstance(raw, Mapping) or not isinstance(raw, Iterable):
-            return self._normalize(raw)
+            return self._classify(self._normalize(raw))
         content: list[str] = []
+        thinking: list[str] = []
         calls: list[ToolCall] = []
         usage = Usage()
         reason = "stop"
         for chunk in raw:
             response = self._normalize(chunk)
+            if response.thinking:
+                thinking.append(response.thinking)
             if response.content:
                 content.append(response.content)
                 if on_text:
@@ -103,5 +127,11 @@ class OllamaRuntime:
             if response.usage.output_tokens:
                 usage.output_tokens = response.usage.output_tokens
             reason = response.stop_reason or reason
-        return ModelResponse("".join(content), calls, usage, reason,
-                             reason in {"length", "max_tokens"})
+        return self._classify(ModelResponse("".join(content), calls, usage, reason,
+                             reason in {"length", "max_tokens"}, "".join(thinking)))
+
+    @staticmethod
+    def _classify(response: ModelResponse) -> ModelResponse:
+        if not response.content.strip() and not response.tool_calls:
+            response.error_code = "EMPTY_VISIBLE_MODEL_RESPONSE"
+        return response

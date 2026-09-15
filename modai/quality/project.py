@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -93,7 +94,7 @@ class ProjectVerifier:
                 if name in scripts:
                     commands.append((f"npm {name}", ["npm", "run", name]))
         if any(self.workspace.glob("test*.py")) or (self.workspace / "tests").is_dir():
-            commands.append(("pytest", ["python3", "-m", "pytest", "-q"]))
+            commands.append(("pytest", [sys.executable, "-m", "pytest", "-q"]))
         results: list[CheckResult] = []
         for name, command in commands[:4]:
             try:
@@ -127,6 +128,12 @@ class ProjectVerifier:
                     payload = json.loads(function("."))
                     verdict = str(payload.get("verdict", "FAIL"))
                     errors = [str(item) for item in payload.get("errors", [])]
+                    errors.extend(f"{view.get('name', 'viewport')}: {error}"
+                                  for view in payload.get("viewports", [])
+                                  for error in view.get("errors", [])
+                                  if not any(str(error) in existing for existing in errors))
+                    if verdict == "FAIL" and not errors:
+                        errors = [f"{name} failed without diagnostic details; inspect validator output"]
                     if verdict == "SKIP":
                         verdict, errors = "FAIL", ["required static-site evidence was skipped"]
                 except Exception as exc:

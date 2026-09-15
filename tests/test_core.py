@@ -61,6 +61,21 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(args.execution_mode, "parallel")
         self.assertEqual(args.max_parallel_agents, 3)
 
+    def test_local_model_recovery_cli_settings(self) -> None:
+        args = build_parser().parse_args([
+            "--model-timeout", "900", "--model-retries", "3",
+            "--model-max-output", "3072",
+        ])
+        self.assertEqual(args.model_timeout_seconds, 900)
+        self.assertEqual(args.model_retries, 3)
+        self.assertEqual(args.model_max_output_tokens, 3072)
+
+    def test_local_model_recovery_settings_are_validated(self) -> None:
+        Settings(model_timeout_seconds=900, model_retries=3,
+                 model_max_output_tokens=3072).validate()
+        with self.assertRaises(ValueError):
+            Settings(model_timeout_seconds=30).validate()
+
     def test_file_and_environment_precedence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"
@@ -686,13 +701,17 @@ class DashboardTests(unittest.TestCase):
             def clear(self):
                 return None
 
+            def message(self, *_args, **_kwargs):
+                """Accept dashboard.message() calls after task completion."""
+                return None
+
         agent = FakeOrchestrator()
         dashboard = FakeDashboard()
         with patch("builtins.input", return_value=""), redirect_stdout(StringIO()):
             dashboard_loop(agent, TerminalUI(color=False, language="en"), dashboard)
         self.assertEqual(dashboard.choose_calls, 2)
         self.assertEqual(agent.calls, [(
-            "Build a static landing page", {"write_allowed": None, "allow_cloud": False},
+            "Build a static landing page", {"write_allowed": True, "allow_cloud": False},
         )])
 
     def test_macos_csi_and_ss3_arrow_sequences_are_decoded(self) -> None:

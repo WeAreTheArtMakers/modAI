@@ -48,6 +48,9 @@ class Settings:
     harness_mode: str = "auto"
     harness_max_turns: int = 80
     compaction_reserve_tokens: int = 2048
+    model_timeout_seconds: float = 720.0
+    model_retries: int = 2
+    model_max_output_tokens: int = 4096
 
     def validate(self) -> None:
         if not self.model.strip():
@@ -92,6 +95,12 @@ class Settings:
             raise ValueError("harness_max_turns 8 ile 500 arasında olmalı")
         if not 512 <= self.compaction_reserve_tokens <= 16384:
             raise ValueError("compaction_reserve_tokens 512 ile 16384 arasında olmalı")
+        if not 60 <= self.model_timeout_seconds <= 3600:
+            raise ValueError("model_timeout_seconds 60 ile 3600 arasında olmalı")
+        if not 0 <= self.model_retries <= 5:
+            raise ValueError("model_retries 0 ile 5 arasında olmalı")
+        if not 256 <= self.model_max_output_tokens <= 8192:
+            raise ValueError("model_max_output_tokens 256 ile 8192 arasında olmalı")
 
     def as_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -168,6 +177,9 @@ def load_settings(path: Path = DEFAULT_CONFIG) -> Settings:
         "MODAI_MODE": ("harness_mode", str),
         "MODAI_HARNESS_MAX_TURNS": ("harness_max_turns", int),
         "MODAI_COMPACTION_RESERVE_TOKENS": ("compaction_reserve_tokens", int),
+        "MODAI_MODEL_TIMEOUT_SECONDS": ("model_timeout_seconds", float),
+        "MODAI_MODEL_RETRIES": ("model_retries", int),
+        "MODAI_MODEL_MAX_OUTPUT_TOKENS": ("model_max_output_tokens", int),
     }
     for env_name, (setting_name, convert) in env_map.items():
         value = os.getenv(env_name)

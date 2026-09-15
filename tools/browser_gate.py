@@ -139,6 +139,8 @@ def validate_browser_quality(path: str = ".") -> str:
         server.server_close()
         thread.join(timeout=2)
     failed = top_errors or any(item["status"] == "FAIL" for item in reports)
+    top_errors.extend(f"{item['name']} ({item['width']}x{item['height']}): {error}"
+                      for item in reports for error in item["errors"])
     return json.dumps({
         "verdict": "FAIL" if failed else "PASS", "errors": top_errors,
         "viewports": reports, "artifact_directory": str(output.relative_to(site_root)),

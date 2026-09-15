@@ -13,9 +13,9 @@ SCHEMAS = [
     {"type": "function", "function": {"name": "ls", "description": "List a bounded project tree.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "depth": {"type": "integer"}, "limit": {"type": "integer"}}}}},
     {"type": "function", "function": {"name": "find", "description": "Find files by glob.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "limit": {"type": "integer"}}}}},
     {"type": "function", "function": {"name": "grep", "description": "Search project text with ripgrep.", "parameters": {"type": "object", "properties": {"pattern": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "string"}, "limit": {"type": "integer"}}, "required": ["pattern"]}}},
-    {"type": "function", "function": {"name": "write", "description": "Atomically create or replace one text file.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}}},
-    {"type": "function", "function": {"name": "edit", "description": "Atomically apply precise exact-text replacements. Every old string must match once; all edits validate before writing.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old": {"type": "string"}, "new": {"type": "string"}}, "required": ["old", "new"]}}}, "required": ["path", "edits"]}}},
-    {"type": "function", "function": {"name": "bash", "description": "Run an allowlisted command as an argument array, never through a shell.", "parameters": {"type": "object", "properties": {"argv": {"type": "array", "items": {"type": "string"}}, "timeout": {"type": "integer"}}, "required": ["argv"]}}},
+    {"type": "function", "function": {"name": "write", "description": "Create or fully replace a text file. USE THIS to create index.html, styles.css, app.js, or any new/changed file. Do NOT use bash to create files.", "parameters": {"type": "object", "properties": {"path": {"type": "string", "description": "Relative path, e.g. 'index.html' or 'src/styles.css'"}, "content": {"type": "string", "description": "Complete UTF-8 file content"}}, "required": ["path", "content"]}}},
+    {"type": "function", "function": {"name": "edit", "description": "Patch an existing file with exact-text replacements. Each 'old' must match exactly once.", "parameters": {"type": "object", "properties": {"path": {"type": "string"}, "edits": {"type": "array", "items": {"type": "object", "properties": {"old": {"type": "string"}, "new": {"type": "string"}}, "required": ["old", "new"]}}}, "required": ["path", "edits"]}}},
+    {"type": "function", "function": {"name": "bash", "description": "Run ONE allowlisted program as an argument array (NOT a shell string). Allowed programs: python3 pytest node npm npx go cargo make rg grep find ls pwd cat head tail wc git. Do NOT pass 'bash', 'sh', 'touch', 'echo', 'curl', 'mv', 'cp' — they are blocked. To create files use the write tool instead.", "parameters": {"type": "object", "properties": {"argv": {"type": "array", "items": {"type": "string"}, "description": "e.g. [\"ls\", \".\"] or [\"python3\", \"-m\", \"pytest\"] — never ['bash','-c','...']"}, "timeout": {"type": "integer"}}, "required": ["argv"]}}},
     {"type": "function", "function": {"name": "git", "description": "Run a read-only git subcommand.", "parameters": {"type": "object", "properties": {"argv": {"type": "array", "items": {"type": "string"}}}, "required": ["argv"]}}},
     {"type": "function", "function": {"name": "delegate", "description": "Ask one bounded read-only specialist to gather independent evidence. Use only when independent inspection materially helps.", "parameters": {"type": "object", "properties": {"task": {"type": "string"}, "focus": {"type": "string"}}, "required": ["task"]}}},
     {"type": "function", "function": {"name": "web_search", "description": "Search the public web. Prefer primary sources and include URLs in the final evidence.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}}, "required": ["query"]}}},
@@ -81,6 +81,16 @@ class ToolRegistry:
             return result
         if name == "git":
             return self.tools.bash(["git", *list(arguments.get("argv", []))])
+        # Normalise legacy or incorrect bash calls where the model passes a
+        # plain string "command" key or wraps argv in a nested dict.
+        if name == "bash":
+            if "command" in arguments and "argv" not in arguments:
+                # model passed {"command": "ls -la"} instead of {"argv": ["ls", "-la"]}
+                cmd = str(arguments["command"]).strip()
+                arguments = {"argv": cmd.split(), "timeout": arguments.get("timeout", 120)}
+            elif isinstance(arguments.get("argv"), str):
+                # model passed {"argv": "ls -la"} as a string
+                arguments = {"argv": arguments["argv"].split(), "timeout": arguments.get("timeout", 120)}
         method = getattr(self.tools, name, None)
         if not callable(method):
             raise KeyError(f"unknown tool: {name}")
@@ -90,5 +100,8 @@ class ToolRegistry:
         return result
 
     @staticmethod
-    def model_result(result: dict[str, Any]) -> str:
-        return json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+    def model_result(result: dict[str, Any], limit: int = 8_000) -> str:
+        value = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        if len(value) <= limit:
+            return value
+        return value[:limit] + '\n{"truncated":true,"hint":"Use a narrower read, grep, or line range."}'

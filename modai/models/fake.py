@@ -17,11 +17,15 @@ class ScriptedRuntime:
         self.responses = deque(responses)
         self.requests: list[dict[str, Any]] = []
 
-    def generate(self, messages, tools, *, on_text=None) -> ModelResponse:
-        self.requests.append({"messages": list(messages), "tools": list(tools)})
+    def generate(self, messages, tools, *, on_text=None,
+                 max_output_tokens=None) -> ModelResponse:
+        self.requests.append({"messages": list(messages), "tools": list(tools),
+                              "max_output_tokens": max_output_tokens})
         if not self.responses:
             raise RuntimeError("ScriptedRuntime response queue is empty")
         response = self.responses.popleft()
+        if isinstance(response, BaseException):
+            raise response
         if on_text and response.content:
             on_text(response.content)
         return response

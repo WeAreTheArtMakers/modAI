@@ -28,6 +28,8 @@ class ModelResponse:
     usage: Usage = field(default_factory=Usage)
     stop_reason: str = "stop"
     truncated: bool = False
+    thinking: str = ""
+    error_code: str | None = None
 
 
 @runtime_checkable
@@ -42,4 +44,5 @@ class ModelRuntime(Protocol):
         tools: list[dict[str, Any]],
         *,
         on_text: Any | None = None,
+        max_output_tokens: int | None = None,
     ) -> ModelResponse: ...

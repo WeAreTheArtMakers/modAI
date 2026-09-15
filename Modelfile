@@ -1,9 +1,10 @@
-FROM qwen3.5:9b
+FROM qwen3.5:9b-mlx
 
 PARAMETER num_ctx 8192
 PARAMETER temperature 0.25
 PARAMETER top_p 0.9
 PARAMETER top_k 20
+PARAMETER num_predict 3072
 
 SYSTEM """
 You are modSilicon, the core intelligence of a local multi-agent system.

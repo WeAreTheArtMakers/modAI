@@ -38,6 +38,8 @@ def test_single_session_writes_and_verifies_artifact():
         assert (root / "notes.txt").read_text() == "done\n"
         assert result.turns == 2
         assert len(agent.runtime.requests) == 2
+        # FIX: with new design tools are always provided (no finalization_only suppression)
+        assert agent.runtime.requests[1]["tools"] != []
 
 
 def test_precise_edit_is_atomic_on_mismatch_and_preserves_crlf_and_bom():
@@ -225,5 +227,66 @@ def test_static_site_repair_uses_latest_failure_in_same_session():
         agent = harness(root, responses, task="Build a responsive HTML landing page")
         result = agent.run()
         assert result.status == "completed"
+        # With the new design: 2 authoritative verifications (fail on first final,
+        # pass on repaired final). Proactive per-mutation verification was removed.
         assert result.verification["sequence"] == 2
         assert "responsive viewport" in json.dumps(agent.runtime.requests, ensure_ascii=False)
+
+
+def test_transient_timeout_retries_same_checkpoint_and_completes():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        events = []
+        agent = harness(root, [
+            TimeoutError("timed out"),
+            ModelResponse(tool_calls=[call(1, "write", path="notes.txt", content="done\n")]),
+            ModelResponse(content="done"),
+        ], model_retries=1, retry_backoff_seconds=0, event=events.append)
+        result = agent.run()
+        assert result.status == "completed"
+        assert (root / "notes.txt").read_text() == "done\n"
+        assert result.metrics["model_calls"] == 3
+        assert any(item.kind == "model_retry" for item in events)
+
+
+def test_timeout_after_verified_mutation_finishes_from_deterministic_evidence():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        # Write a file then immediately time out — model has NOT declared done.
+        # New semantics: timeout mid-session → needs_attention (session preserved).
+        # Only write + no-tool final response → completed.
+        agent = harness(root, [
+            ModelResponse(tool_calls=[call(1, "write", path="notes.txt", content="done\n")]),
+            TimeoutError("timed out while finalizing"),
+        ], model_retries=0, retry_backoff_seconds=0)
+        result = agent.run()
+        # Model wrote the file but never declared done → preserved, not completed
+        assert result.status == "needs_attention"
+        assert (root / "notes.txt").read_text() == "done\n"
+        assert result.changed_paths == ["notes.txt"]
+        assert "modai --resume" in result.final
+
+
+def test_repeated_timeout_is_resumable_instead_of_failed():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        agent = harness(root, [TimeoutError("timed out"), TimeoutError("timed out")],
+                        model_retries=1, retry_backoff_seconds=0)
+        result = agent.run()
+        assert result.status == "needs_attention"
+        assert "modai --resume" in result.final
+        assert (root / ".run" / "session.jsonl").is_file()
+
+
+def test_large_write_result_and_internal_directories_do_not_bloat_context():
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        (root / ".modai" / "browser").mkdir(parents=True)
+        (root / ".modai" / "browser" / "desktop.png").write_bytes(b"x")
+        tools = CodingTools(root, ToolPolicy(Capabilities(write=True)), root / ".logs")
+        listing = tools.ls()
+        assert not any(".modai" in item for item in listing["entries"])
+        result = tools.write("large.html", "x" * 20_000)
+        encoded = ToolRegistry.model_result(result)
+        assert "diff" not in result
+        assert len(encoded) < 1_000

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -43,10 +45,21 @@ class CodingTools:
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         start = max(1, int(start_line))
         end = min(len(lines), max(start, int(end_line)))
-        numbered = "\n".join(f"{number:>5} | {lines[number - 1]}" for number in range(start, end + 1))
-        return {"path": self._relative(target), "start_line": start, "end_line": end,
+        rendered: list[str] = []
+        rendered_chars = 0
+        returned_end = start - 1
+        output_limit = min(self.max_output_chars, 8_000)
+        for number in range(start, end + 1):
+            line = f"{number:>5} | {lines[number - 1]}"
+            if rendered and rendered_chars + len(line) + 1 > output_limit:
+                break
+            rendered.append(line[:output_limit])
+            rendered_chars += len(rendered[-1]) + 1
+            returned_end = number
+        numbered = "\n".join(rendered)
+        return {"path": self._relative(target), "start_line": start, "end_line": returned_end,
                 "total_lines": len(lines), "content": numbered,
-                "truncated": end < len(lines)}
+                "truncated": returned_end < len(lines) or returned_end < end}
 
     def ls(self, path: str = ".", depth: int = 2, limit: int = 300) -> dict[str, Any]:
         target = self._path(path, must_exist=True)
@@ -55,7 +68,8 @@ class CodingTools:
         for item in sorted(target.rglob("*")):
             if len(item.parts) - base_parts > max(1, min(int(depth), 6)):
                 continue
-            if any(part in {".git", "node_modules", ".venv", "__pycache__"} for part in item.parts):
+            if any(part in {".git", "node_modules", ".venv", "__pycache__", ".modai",
+                            "dist", "build", "coverage"} for part in item.parts):
                 continue
             entries.append(self._relative(item) + ("/" if item.is_dir() else ""))
             if len(entries) >= limit:
@@ -64,8 +78,9 @@ class CodingTools:
 
     def find(self, pattern: str = "*", path: str = ".", limit: int = 200) -> dict[str, Any]:
         target = self._path(path, must_exist=True)
+        ignored = {".git", "node_modules", ".venv", "__pycache__", ".modai", "dist", "build", "coverage"}
         matches = [self._relative(item) for item in sorted(target.rglob(pattern))
-                   if ".git" not in item.parts and "node_modules" not in item.parts][:limit]
+                   if not ignored.intersection(item.parts)][:limit]
         return {"pattern": pattern, "matches": matches, "truncated": len(matches) >= limit}
 
     def grep(self, pattern: str, path: str = ".", glob: str | None = None,
@@ -105,7 +120,9 @@ class CodingTools:
         self._atomic_write(target, content.encode("utf-8"))
         self.mutated_paths.add(self._relative(target))
         return {"path": self._relative(target), "changed": True,
-                "bytes": len(content.encode("utf-8")), "diff": self._diff(before, content, path)}
+                "bytes": len(content.encode("utf-8")),
+                "sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "summary": "atomic replacement completed"}
 
     def make_directory(self, path: str) -> dict[str, Any]:
         target = self._path(path)
@@ -149,7 +166,11 @@ class CodingTools:
                 "diff": self._diff(normalized, updated, path)}
 
     def bash(self, argv: list[str], timeout: int = 120) -> dict[str, Any]:
+        if argv and argv[0] == sys.executable:
+            argv = ["python3", *argv[1:]]
         self.policy.validate_command(argv)
+        if argv[0] in {"python", "python3"}:
+            argv = [sys.executable, *argv[1:]]
         log_path = self.log_dir / f"command-{len(list(self.log_dir.glob('command-*.log'))) + 1:04d}.log"
         with log_path.open("wb") as log:
             process = subprocess.run(argv, cwd=self.workspace, stdout=log, stderr=subprocess.STDOUT,
@@ -172,4 +193,4 @@ class CodingTools:
     def _diff(before: str, after: str, path: str) -> str:
         value = "".join(difflib.unified_diff(before.splitlines(True), after.splitlines(True),
                                              fromfile=f"a/{path}", tofile=f"b/{path}", n=3))
-        return value[:8000]
+        return value[:4000]
