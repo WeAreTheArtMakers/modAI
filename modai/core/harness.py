@@ -36,6 +36,8 @@ WORKFLOW:
    inspect the smallest relevant sources first (README, package.json, etc.) — 1-2 targeted reads only.
    If the user supplied complete specs, start implementation directly.
 2. Implement: call write/edit to create or update files.
+   For multi-file work (HTML + CSS + JS), write ONE file per tool call — do not attempt to
+   write all files in a single response. Each file gets its own write() call.
 3. Run relevant tests or checks with bash if needed.
 4. Do not narrate hypothetical code — produce real artifacts.
 5. When you believe the implementation is complete, stop calling tools and return a concise final summary.
@@ -346,7 +348,7 @@ class CodingHarness:
                 empty_response_retries += 1
                 self.events.emit("empty_model_response", turn=turns,
                                  attempt=empty_response_retries)
-                if empty_response_retries <= 2:
+                if empty_response_retries <= 3:
                     self._reduced_context_retry = True
                     nudge = {"role": "user", "content": (
                         "Your previous response was empty. "
@@ -425,9 +427,10 @@ class CodingHarness:
                     # 3 consecutive identical tool+arg with no repo change or new evidence.
                     if self.coding_tools.policy.capabilities.write:
                         nudge_content = (
-                            "NO-PROGRESS GUARD: the same tool call was repeated without producing "
-                            "new evidence or a file change. Stop re-reading the same files. "
-                            "Call write/edit to make the next concrete change, or return a final summary if done."
+                            "NO-PROGRESS GUARD: you have been calling the same tool repeatedly "
+                            "without writing any files. You must now call the write tool to create "
+                            "the required files. Example: write(path='index.html', content='<!doctype html>...'). "
+                            "Do NOT return a text summary — call write() immediately."
                         )
                     else:
                         nudge_content = (
