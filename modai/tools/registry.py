@@ -30,8 +30,18 @@ class ToolRegistry:
         self.delegate = delegate
         self.evidence = evidence or SharedEvidenceCache()
 
-    def schemas(self) -> list[dict[str, Any]]:
-        return [schema for schema in SCHEMAS if self.tools.policy.allows(schema["function"]["name"])]
+    def schemas(self, allowed_names: set[str] | None = None) -> list[dict[str, Any]]:
+        """Return tool schemas filtered by policy.
+        
+        allowed_names: optional additional allowlist on top of policy — used by the
+        harness to temporarily restrict the tool surface (exploration budget,
+        repair-mode restriction, bash circuit-breaker).
+        """
+        return [
+            schema for schema in SCHEMAS
+            if self.tools.policy.allows(schema["function"]["name"])
+            and (allowed_names is None or schema["function"]["name"] in allowed_names)
+        ]
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         # Accept persisted 4.x tool calls during session migration; new schemas

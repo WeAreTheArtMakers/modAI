@@ -261,11 +261,28 @@ class CodingHarness:
         repair_count = 0
         stalled = 0
         last_progress = self._progress_hash("", {})
-        # FIX #2: track whether the model last responded without tools (= believes it's done)
         completion_candidate = False
         report = None
         turns = 0
         empty_response_retries = 0
+
+        # ── Task 2: Exploration budget ────────────────────────────────────────
+        # Before the first mutation, cap discovery tool batches to 2.
+        # On batch 3+ without any write, restrict schema to write+edit+read only.
+        _exploration_batches: int = 0          # tool batches before first mutation
+        _MAX_EXPLORATION_BATCHES: int = 2       # after this, disable bash/grep/find/ls
+
+        # ── Task 3: Bash circuit-breaker ──────────────────────────────────────
+        # Track consecutive non-retryable bash errors. After 2, disable bash.
+        _bash_policy_errors: int = 0
+        _bash_disabled: bool = False
+        _BASH_CIRCUIT_LIMIT: int = 2
+
+        # ── Task 4: Repair-mode restriction ───────────────────────────────────
+        # After a verification FAIL, restrict to read+write+edit only (no bash,
+        # no find, no grep) until the repair succeeds or a new tool call fires.
+        _repair_mode: bool = False
+
         if resume and self.coding_tools.mutated_paths:
             report = self._verify()
             message = self._verification_message(report, proactive=True)
@@ -277,10 +294,11 @@ class CodingHarness:
 
             steering_items = self.session.take_steering()
             if steering_items:
-                # FIX #4: reset completion state on follow-up / steering so tools stay open
+                # reset completion state on follow-up / steering so tools stay open
                 report = None
                 repair_count = 0
                 stalled = 0
+                _repair_mode = False
             for steering in steering_items:
                 message = {"role": "user", "content": "STEERING UPDATE\n" + steering}
                 self._messages.append(message); self._append(message)
@@ -297,9 +315,37 @@ class CodingHarness:
                 self._model_calls += 1
                 self.events.emit("model_started", turn=turns, attempt=retry + 1)
                 try:
-                    # _reduced_context is an OllamaRuntime-specific kwarg.
-                    # Pass it only when the runtime accepts it; fall back to a plain
-                    # call for ScriptedRuntime / any other protocol-only implementation.
+                    # ── Compute active tool schema ─────────────────────────────
+                    # Three overlapping restrictions can narrow the schema:
+                    #
+                    # 1. exploration budget: before first mutation, allow up to 2
+                    #    discovery batches; after that restrict to write+edit+read.
+                    # 2. bash circuit-breaker: too many non-retryable bash policy
+                    #    errors → disable bash for the rest of the session.
+                    # 3. repair mode: after a verification FAIL → minimal set.
+                    _write_core = {"write", "edit", "read"}
+                    if _repair_mode:
+                        # Repair: only targeted read + mutation tools
+                        _allowed = _write_core
+                    elif not self.coding_tools.mutated_paths and _exploration_batches >= _MAX_EXPLORATION_BATCHES:
+                        # Exploration budget exhausted: force implementation
+                        _allowed = _write_core
+                        self.events.emit("exploration_budget_exhausted",
+                                         batches=_exploration_batches)
+                    else:
+                        _allowed = None  # full schema (policy filtered)
+
+                    if _bash_disabled and _allowed is not None:
+                        _allowed = _allowed - {"bash"}
+                    elif _bash_disabled:
+                        # bash disabled but full schema otherwise
+                        all_names = {s["function"]["name"] for s in self.registry.schemas()}
+                        _allowed = all_names - {"bash"}
+
+                    _active_schemas = self.registry.schemas(
+                        allowed_names=_allowed  # None → all policy-allowed schemas
+                    )
+
                     gen_kw: dict[str, Any] = {
                         "on_text": lambda text: self.events.emit("text_delta", text=text),
                     }
@@ -307,7 +353,7 @@ class CodingHarness:
                         gen_kw["_reduced_context"] = True
                     response = self.runtime.generate(
                         self._messages,
-                        self.registry.schemas(),
+                        _active_schemas,
                         **gen_kw,
                     )
                     self._reduced_context_retry = False
@@ -383,10 +429,12 @@ class CodingHarness:
 
             # ── Tool execution branch ─────────────────────────────────────────
             if response.tool_calls:
-                completion_candidate = False  # FIX #2: model is still working
+                completion_candidate = False
                 batch_output_remaining = 16_000
                 last_tool_name = ""
                 last_args: dict[str, Any] = {}
+                _batch_has_mutation = False
+
                 for call in response.tool_calls:
                     self._tool_calls += 1
                     self.events.emit("tool_started", name=call.name, arguments=call.arguments)
@@ -396,6 +444,48 @@ class CodingHarness:
                     except Exception as exc:
                         result = {"error": f"{type(exc).__name__}: {exc}"}
                         ok = False
+
+                        # ── Task 3: Bash circuit-breaker ──────────────────────
+                        # Detect non-retryable policy errors from bash and count them.
+                        # After _BASH_CIRCUIT_LIMIT consecutive such errors, disable bash.
+                        if call.name == "bash" and not ok:
+                            err_str = str(result.get("error", ""))
+                            is_policy_error = (
+                                "inline executable code is disabled" in err_str
+                                or "is not allowlisted" in err_str
+                                or "shell operators are not accepted" in err_str
+                                or "mutating git command is disabled" in err_str
+                                or "package mutation requires" in err_str
+                                or "PermissionError" in err_str
+                            )
+                            if is_policy_error:
+                                _bash_policy_errors += 1
+                                # Enrich the error with actionable guidance
+                                result = {
+                                    "error": err_str,
+                                    "error_code": "POLICY_VIOLATION",
+                                    "retryable": False,
+                                    "recommended_action": (
+                                        "This bash command is permanently blocked by policy. "
+                                        "Do NOT retry with the same or similar bash command. "
+                                        "Use the write or edit tool for file changes instead."
+                                    ),
+                                }
+                                if _bash_policy_errors >= _BASH_CIRCUIT_LIMIT and not _bash_disabled:
+                                    _bash_disabled = True
+                                    self.events.emit("bash_circuit_open",
+                                                     errors=_bash_policy_errors)
+                                    # Inject a system note so the model knows bash is gone
+                                    note = {"role": "user", "content": (
+                                        "BASH DISABLED: bash has been blocked after repeated "
+                                        "policy violations. Use write/edit to make file changes. "
+                                        "Do not attempt bash calls for the rest of this session."
+                                    )}
+                                    self._messages.append(note); self._append(note)
+                            else:
+                                # Non-policy bash failure: reset counter (transient issue)
+                                _bash_policy_errors = 0
+
                     if ok and isinstance(result, dict) and isinstance(result.get("_usage"), dict):
                         delegate_usage = result.pop("_usage")
                         self._record_usage(ModelResponse(usage=Usage(
@@ -410,11 +500,28 @@ class CodingHarness:
                                     "content": model_content}
                     self._messages.append(tool_message); self._append(tool_message)
                     self.events.emit("tool_finished", name=call.name, ok=ok, result=result)
-                    if ok and isinstance(result, dict) and result.get("changed") and self._first_mutation_turn is None:
-                        self._first_mutation_turn = turns
-                    # Track last tool call identity for progress hashing
+                    if ok and isinstance(result, dict) and result.get("changed"):
+                        if self._first_mutation_turn is None:
+                            self._first_mutation_turn = turns
+                        _batch_has_mutation = True
+                        _repair_mode = False   # Task 4: repair succeeds → restore full tools
                     last_tool_name = call.name
                     last_args = dict(call.arguments)
+
+                # ── Task 2: Track exploration batches ─────────────────────────
+                if not self.coding_tools.mutated_paths:
+                    # No mutation yet — this was a discovery batch
+                    _exploration_batches += 1
+                    if _exploration_batches == _MAX_EXPLORATION_BATCHES:
+                        # Inject a nudge so the model knows the budget is up
+                        nudge = {"role": "user", "content": (
+                            "EXPLORATION BUDGET: you have used your 2 discovery turns. "
+                            "You must now implement: call write() to create the required files. "
+                            "bash, grep, find, and ls are temporarily disabled until you write a file."
+                        )}
+                        self._messages.append(nudge); self._append(nudge)
+                        self.events.emit("exploration_budget_exhausted",
+                                         batches=_exploration_batches)
                 # FIX #5: progress = repo state + last tool name + discriminating arg
                 current_progress = self._progress_hash(last_tool_name, last_args)
                 if current_progress == last_progress:
@@ -445,8 +552,6 @@ class CodingHarness:
 
                 # No proactive verification — the authoritative verify runs only
                 # when the model returns without tools (completion candidate path).
-                # Running ProjectVerifier after each mutation is expensive and causes
-                # the PASS CHECKPOINT message to prematurely signal "done".
                 continue
 
             # ── No tool calls → model believes it is done ─────────────────────
@@ -475,6 +580,7 @@ class CodingHarness:
                 return self._result("needs_attention", final or "Verification still fails.", report, turns)
             repair_count += 1
             completion_candidate = False  # back to working
+            _repair_mode = True  # Task 4: restrict to read+write+edit during repair
             exact = "\n".join(f"- {item}" for item in report.errors[:30]) or "- required evidence is missing"
             feedback = {"role": "user", "content": (
                 f"VALIDATION FAILED (repair {repair_count}/{self.repair_rounds}).\n{exact}\n"

@@ -96,20 +96,47 @@ def validate_browser_quality(path: str = ".") -> str:
                       const anchors = [...document.querySelectorAll('a[href]')].map(a => a.getAttribute('href'));
                       const brokenAnchors = anchors.filter(h => h && h.startsWith('#') && h !== '#'
                         && !document.getElementById(decodeURIComponent(h.slice(1))));
+                      // Detect which elements cause horizontal overflow
+                      const vw = window.innerWidth;
+                      const overflowOffenders = [...document.querySelectorAll('*')]
+                        .map(el => {
+                          const r = el.getBoundingClientRect();
+                          const overflow = Math.round(Math.max(r.right - vw, -r.left, 0));
+                          if (overflow < 2) return null;
+                          const tag = el.tagName.toLowerCase();
+                          const id = el.id ? '#' + el.id : '';
+                          const cls = [...el.classList].slice(0,3).map(c=>'.'+c).join('');
+                          return { selector: tag + id + cls, width: Math.round(r.width), overflow };
+                        })
+                        .filter(Boolean)
+                        .sort((a,b) => b.overflow - a.overflow)
+                        .slice(0, 5);
                       return {
                         scrollWidth: document.documentElement.scrollWidth,
                         innerWidth: window.innerWidth,
                         textLength: (document.body?.innerText || '').trim().length,
                         visibleElements: [...document.body.querySelectorAll('h1,h2,p,a,button,img,main,section')].filter(visible).length,
                         brokenAnchors,
-                        localLinks: anchors.filter(h => h && !h.startsWith('#') && !/^(?:https?:|mailto:|tel:|javascript:)/i.test(h))
+                        localLinks: anchors.filter(h => h && !h.startsWith('#') && !/^(?:https?:|mailto:|tel:|javascript:)/i.test(h)),
+                        overflowOffenders,
                       };
                     }""")
                     errors: list[str] = []
                     if response is None or response.status >= 400:
                         errors.append(f"navigation status {getattr(response, 'status', 'none')}")
                     if metrics["scrollWidth"] > metrics["innerWidth"] + 1:
-                        errors.append(f"horizontal overflow {metrics['scrollWidth']}>{metrics['innerWidth']}")
+                        offenders = metrics.get("overflowOffenders", [])
+                        if offenders:
+                            top = offenders[0]
+                            hint = (
+                                f"horizontal overflow {metrics['scrollWidth']}>{metrics['innerWidth']} "
+                                f"— likely offender: {top['selector']} "
+                                f"(element width {top['width']}px, overflow {top['overflow']}px). "
+                                "Fix: add max-width:100%; overflow-x:auto or clip with overflow:hidden."
+                            )
+                        else:
+                            hint = f"horizontal overflow {metrics['scrollWidth']}>{metrics['innerWidth']}"
+                        errors.append(hint)
                     if metrics["textLength"] == 0 or metrics["visibleElements"] == 0:
                         errors.append("page has no visible content")
                     if metrics["brokenAnchors"]:
