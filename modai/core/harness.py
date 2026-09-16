@@ -28,6 +28,8 @@ Work directly in the selected repository until the user's objective is fully imp
 TOOL RULES:
 - CREATE or REPLACE a file → use the `write` tool: write(path="index.html", content="...")
 - PATCH an existing file   → use the `edit` tool
+- EXTEND an existing file  → use the `append` tool (end-of-file continuation chunk)
+- Large files must be created incrementally: write creates/replaces one bounded chunk (max 4000 chars); append extends an existing file with another bounded chunk; edit performs precise replacements. Never attempt an oversized single write tool call.
 - Run tests / read-only checks → use `bash` (argv array only, e.g. ["ls", "."])
 - bash NEVER writes files. bash/sh are NOT allowed as argv[0] — use write/edit for all file creation.
 
@@ -631,10 +633,10 @@ class CodingHarness:
                     )
 
             # ── Active schema selection ────────────────────────────────────────
-            # v4.1: after discovery, implementation-only tools (write/edit).
-            # read stays open during discovery only; the preserved-run trace
-            # showed budget-exhausted read looping over hallucinated paths.
-            _IMPLEMENTATION_ONLY: set[str] = {"write", "edit"}
+            # v4.1.3 bootstrap: before the first mutation, implementation
+            # exposes ONLY write. There is nothing reliable to edit yet, and
+            # the first required action is a bounded file creation.
+            _BOOTSTRAP_ONLY: set[str] = {"write"}
             # Targeted repair: read+grep+edit (no write, no bash)
             _repair_targeted: set[str] = {"read", "grep", "edit"}
             # Structural repair: read+grep+edit+write (missing files)
@@ -645,7 +647,7 @@ class CodingHarness:
                     _repair_struct if _repair_structural else _repair_targeted
                 )
             elif _force_implementation and not self.coding_tools.mutated_paths:
-                _allowed = _IMPLEMENTATION_ONLY
+                _allowed = _BOOTSTRAP_ONLY
             else:
                 _allowed = None  # full policy-filtered schema
 
@@ -961,13 +963,16 @@ class CodingHarness:
                                 "content": (
                                     "IMPLEMENTATION PHASE\n\n"
                                     "Repository inspection is complete.\n"
-                                    "Create the artifact now.\n\n"
-                                    "For non-trivial web pages:\n"
-                                    "1. write a small valid index.html structure first;\n"
-                                    "2. write styles.css in a separate tool call;\n"
-                                    "3. continue with targeted edits.\n\n"
-                                    "Do not attempt to emit the entire application "
-                                    "in one oversized tool call."
+                                    "Create a SMALL valid first artifact now using write().\n"
+                                    "write content is limited to 4000 characters.\n\n"
+                                    "For larger files:\n"
+                                    "- write a minimal valid scaffold first;\n"
+                                    "- continue in later turns with additional bounded "
+                                    "write/append/edit calls.\n\n"
+                                    "Do not attempt to generate the entire application "
+                                    "in one oversized tool call.\n\n"
+                                    "Only write is available until the first successful "
+                                    "repository mutation."
                                 ),
                             }
                             self._messages.append(nudge)

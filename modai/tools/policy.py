@@ -26,7 +26,7 @@ class ToolPolicy:
         self.capabilities = capabilities
 
     def allows(self, tool: str) -> bool:
-        if tool in {"edit", "write"}:
+        if tool in {"edit", "write", "append"}:
             return self.capabilities.write
         if tool == "delegate":
             return self.capabilities.delegate

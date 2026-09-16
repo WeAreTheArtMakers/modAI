@@ -73,7 +73,7 @@ def test_failed_read_does_not_consume_discovery_budget():
         assert "IMPLEMENTATION PHASE" not in json.dumps(agent.runtime.requests, ensure_ascii=False)
 
 
-# ── 2: two successes -> write/edit only ──────────────────────────────────────
+# ── 2: two successes -> write-only bootstrap ──────────────────────────────────
 
 def test_two_successful_discovery_calls_switch_to_mutation_only_tools():
     with tempfile.TemporaryDirectory() as d:
@@ -89,7 +89,7 @@ def test_two_successful_discovery_calls_switch_to_mutation_only_tools():
         result = agent.run()
 
         assert result.status == "completed"
-        assert _tool_names(agent.runtime.requests[2]) == {"write", "edit"}, (
+        assert _tool_names(agent.runtime.requests[2]) == {"write"}, (
             f"expected implementation-only tools, got {sorted(_tool_names(agent.runtime.requests[2]))}"
         )
 
@@ -111,7 +111,7 @@ def test_missing_paths_cannot_loop_indefinitely():
 
         assert result.status == "completed", f"got {result.status}: {result.final}"
         # Two consecutive PATH_NOT_FOUND closes discovery even with 0 successes.
-        assert _tool_names(agent.runtime.requests[2]) == {"write", "edit"}
+        assert _tool_names(agent.runtime.requests[2]) == {"write"}
 
         history = json.dumps(agent.runtime.requests, ensure_ascii=False)
         assert "PATH_NOT_FOUND" in history

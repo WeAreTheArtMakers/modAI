@@ -5,7 +5,7 @@ read/read-fail/bash-find/bash-find/ls with zero mutations. Repair code is
 untouched; these tests lock the hard boundary only:
 
   at most 3 pre-mutation tool calls of ANY kind -> next schema is
-  exactly {write, edit} until the first successful mutation.
+  exactly {write} (bootstrap) until the first successful mutation.
 """
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def _seed(root: Path) -> None:
 # ── 1: hard limit across tool types ──────────────────────────────────────────
 
 def test_hard_limit_forces_implementation_only_schema():
-    """read-ok + read-fail + bash -> turn 4 schema is exactly {write, edit}."""
+    """read-ok + read-fail + bash -> turn 4 schema is exactly {write} (bootstrap)."""
     with tempfile.TemporaryDirectory() as d:
         root = Path(d)
         _seed(root)
@@ -63,7 +63,7 @@ def test_hard_limit_forces_implementation_only_schema():
         result = agent.run()
 
         assert result.status == "completed", f"got {result.status}: {result.final}"
-        assert _tool_names(agent.runtime.requests[3]) == {"write", "edit"}, (
+        assert _tool_names(agent.runtime.requests[3]) == {"write"}, (
             f"turn 4 must be implementation-only, got {sorted(_tool_names(agent.runtime.requests[3]))}"
         )
 
@@ -253,7 +253,7 @@ def test_implementation_nudge_steers_incremental_writes():
         ])
         assert agent.run().status == "completed"
         history = json.dumps(agent.runtime.requests, ensure_ascii=False)
-        assert "in a separate tool call" in history
+        assert "bounded write/append/edit" in history
         assert "oversized tool call" in history
 
 

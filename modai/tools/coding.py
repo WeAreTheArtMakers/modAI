@@ -13,6 +13,13 @@ from typing import Any
 from .policy import ToolPolicy
 
 
+# v4.1.3: canonical model-facing write-chunk size. Model-generated write/append
+# content larger than this is rejected at the ToolRegistry boundary
+# (CONTENT_TOO_LARGE) so large files are built as staged bounded mutations.
+# Internal Python code and fixtures may still handle bigger files directly.
+MODEL_WRITE_MAX_CHARS = 4000
+
+
 class CodingTools:
     def __init__(self, workspace: Path, policy: ToolPolicy, log_dir: Path,
                  max_output_chars: int = 12000) -> None:
@@ -133,6 +140,25 @@ class CodingTools:
         existed = target.exists()
         target.mkdir(parents=True, exist_ok=True)
         return {"path": self._relative(target), "changed": not existed}
+
+    def append(self, path: str, content: str) -> dict[str, Any]:
+        """Append a bounded text chunk to the end of an existing text file.
+
+        Never creates a missing file. Existing bytes are preserved exactly;
+        the concatenation is written back atomically.
+        """
+        target = self._path(path, must_exist=True)
+        if not target.is_file():
+            raise IsADirectoryError(path)
+        if not content:
+            return {"path": self._relative(target), "changed": False,
+                    "reason": "empty append is a no-op"}
+        existing = target.read_bytes()
+        self._atomic_write(target, existing + content.encode("utf-8"))
+        self.mutated_paths.add(self._relative(target))
+        return {"path": self._relative(target), "changed": True,
+                "bytes_added": len(content.encode("utf-8")),
+                "bytes": len(existing) + len(content.encode("utf-8"))}
 
     def edit(self, path: str, edits: list[dict[str, str]]) -> dict[str, Any]:
         target = self._path(path, must_exist=True)
