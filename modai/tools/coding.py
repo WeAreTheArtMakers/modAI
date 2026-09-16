@@ -18,9 +18,10 @@ from .policy import ToolPolicy
 # (CONTENT_TOO_LARGE) so large files are built as staged bounded mutations.
 # Internal Python code and fixtures may still handle bigger files directly.
 MODEL_WRITE_MAX_CHARS = 4000
-# v4.1.4: tighter chunk for the bootstrap-rescue micro-context. The first
-# artifact only unlocks the session; it must easily fit one generation.
-BOOTSTRAP_WRITE_MAX_CHARS = 2500
+# v4.1.4: preferred size for the bootstrap-rescue first artifact. Guidance
+# only — runtime enforcement stays at MODEL_WRITE_MAX_CHARS, so a valid ~3K
+# rescue write is accepted.
+BOOTSTRAP_WRITE_TARGET_CHARS = 2500
 # v4.1.4: deterministic evidence budget for the rescue micro-context.
 RESCUE_EVIDENCE_MAX_CHARS = 2500
 

@@ -14,7 +14,8 @@ from modai.core.contracts import infer_contract
 from modai.core.evidence import SharedEvidenceCache
 from modai.quality.project import ProjectVerifier, project_instructions, project_snapshot
 from modai.tools.coding import (
-    BOOTSTRAP_WRITE_MAX_CHARS,
+    BOOTSTRAP_WRITE_TARGET_CHARS,
+    MODEL_WRITE_MAX_CHARS,
     RESCUE_EVIDENCE_MAX_CHARS,
     CodingTools,
 )
@@ -357,11 +358,12 @@ class CodingHarness:
             content_prop = schema["function"]["parameters"]["properties"]["content"]
         except (KeyError, TypeError):
             return None
-        content_prop["maxLength"] = BOOTSTRAP_WRITE_MAX_CHARS
+        content_prop["maxLength"] = MODEL_WRITE_MAX_CHARS
         content_prop["description"] = (
-            "Small scaffold chunk only, max "
-            f"{BOOTSTRAP_WRITE_MAX_CHARS} characters. Create the minimal valid "
-            "first artifact; do not complete the whole task."
+            "Create a small first artifact. Aim for roughly "
+            f"{BOOTSTRAP_WRITE_TARGET_CHARS} characters. Hard maximum: "
+            f"{MODEL_WRITE_MAX_CHARS} characters. Larger files must be "
+            "continued in later write/append/edit calls."
         )
         rescue_messages = [
             {"role": "system", "content": (
@@ -377,12 +379,15 @@ class CodingHarness:
             {"role": "user", "content": (
                 "CURRENT SUBTASK\n"
                 "Create only the first small artifact.\n"
+                "Aim for roughly 2500 characters.\n"
+                "Hard maximum: 4000 characters.\n"
+                "Do not complete the full application in this turn.\n"
+                "Use later write/append/edit calls for additional content.\n"
                 "For a web page:\n"
                 "- create index.html\n"
                 "- valid HTML scaffold only\n"
                 "- link styles.css\n"
                 "- no inline CSS\n"
-                f"- under {BOOTSTRAP_WRITE_MAX_CHARS} characters\n"
                 "- do not complete styling\n"
                 "- call write exactly once"
             )},

@@ -14,7 +14,9 @@ from pathlib import Path
 from modai.core.harness import CodingHarness
 from modai.models.base import ModelResponse, ToolCall, Usage
 from modai.models.fake import ScriptedRuntime
-from modai.tools.coding import BOOTSTRAP_WRITE_MAX_CHARS
+from modai.tools.coding import BOOTSTRAP_WRITE_TARGET_CHARS, MODEL_WRITE_MAX_CHARS, CodingTools
+from modai.tools.policy import Capabilities, ToolPolicy
+from modai.tools.registry import ToolRegistry
 
 
 def _call(n: int, name: str, **args) -> ToolCall:
@@ -88,7 +90,8 @@ def test_rescue_request_is_write_only_with_tighter_cap():
         req = _rescue_request(agent)
         assert _tool_names(req) == {"write"}
         content_prop = req["tools"][0]["function"]["parameters"]["properties"]["content"]
-        assert content_prop["maxLength"] == BOOTSTRAP_WRITE_MAX_CHARS == 2500
+        assert content_prop["maxLength"] == MODEL_WRITE_MAX_CHARS == 4000
+        assert "2500" in content_prop.get("description", "")
 
 
 # ── 3: no discovery history carried ──────────────────────────────────────────
@@ -247,3 +250,55 @@ def test_non_length_empty_keeps_existing_policy():
         assert not [e for e in events if e.kind == "bootstrap_rescue"]
         # Bootstrap still holds: post-empty turn remains write-only.
         assert _tool_names(agent.runtime.requests[3]) == {"write"}
+
+
+# ── contract alignment: target vs hard limit ─────────────────────────────────
+
+def test_contract_constants():
+    assert MODEL_WRITE_MAX_CHARS == 4000
+    assert BOOTSTRAP_WRITE_TARGET_CHARS == 2500
+
+
+def test_rescue_prompt_states_target_and_hard_limit():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        _seed(root)
+        agent = _harness(root, _bootstrap_script())
+        assert agent.run().status == "completed"
+        subtask = next(
+            m["content"] for m in _rescue_request(agent)["messages"]
+            if m.get("role") == "user" and "CURRENT SUBTASK" in m.get("content", "")
+        )
+        assert "2500" in subtask and "4000" in subtask
+
+
+def _make_rescue_registry(root: Path) -> tuple:
+    tools = CodingTools(root, ToolPolicy(Capabilities(write=True)), root / ".logs")
+    return tools, ToolRegistry(tools)
+
+
+def test_realistic_bootstrap_size_accepted(tmp_path: Path):
+    tools, registry = _make_rescue_registry(tmp_path)
+    result = registry.execute("write", {"path": "b.txt", "content": "x" * 3089})
+    assert result["changed"] is True
+    assert (tmp_path / "b.txt").stat().st_size == 3089
+
+
+def test_hard_limit_boundary_4000_4001(tmp_path: Path):
+    _, registry = _make_rescue_registry(tmp_path)
+    assert registry.execute("write", {"path": "ok.txt", "content": "y" * 4000})["changed"] is True
+    rejected = registry.execute("write", {"path": "no.txt", "content": "y" * 4001})
+    assert rejected.get("error_code") == "CONTENT_TOO_LARGE"
+    assert not (tmp_path / "no.txt").exists()
+
+
+def test_append_contract_uses_hard_limit(tmp_path: Path):
+    from modai.tools.registry import SCHEMAS
+
+    tools, registry = _make_rescue_registry(tmp_path)
+    content_prop = next(s for s in SCHEMAS if s["function"]["name"] == "append")
+    content_prop = content_prop["function"]["parameters"]["properties"]["content"]
+    assert content_prop["maxLength"] == MODEL_WRITE_MAX_CHARS == 4000
+    registry.execute("write", {"path": "f.txt", "content": "one\n"})
+    result = registry.execute("append", {"path": "f.txt", "content": "z" * 4000})
+    assert result["changed"] is True
