@@ -13,7 +13,11 @@ from modai.orchestration.delegation import ReadOnlyDelegate
 from modai.core.contracts import infer_contract
 from modai.core.evidence import SharedEvidenceCache
 from modai.quality.project import ProjectVerifier, project_instructions, project_snapshot
-from modai.tools.coding import CodingTools
+from modai.tools.coding import (
+    BOOTSTRAP_WRITE_MAX_CHARS,
+    RESCUE_EVIDENCE_MAX_CHARS,
+    CodingTools,
+)
 from modai.tools.policy import Capabilities, ToolPolicy
 from modai.tools.registry import ToolRegistry
 
@@ -304,6 +308,132 @@ class CodingHarness:
             return []
         return entries[:limit]
 
+    def _rescue_evidence(self, limit: int = RESCUE_EVIDENCE_MAX_CHARS) -> str:
+        """Deterministic bounded evidence for the bootstrap-rescue context.
+
+        Clipped contents of successful read results already in the session;
+        falls back to the top-level tree. No summarization, no extra model call.
+        """
+        chunks: list[str] = []
+        used = 0
+        for msg in self._messages:
+            if msg.get("role") != "tool" or msg.get("name") != "read":
+                continue
+            body = str(msg.get("content", ""))
+            try:
+                payload = json.loads(body)
+                if isinstance(payload, dict) and payload.get("content"):
+                    body = str(payload["content"])
+            except (ValueError, TypeError):
+                pass
+            if not body.strip():
+                continue
+            chunks.append(body)
+            used += len(body)
+            if used >= limit:
+                break
+        text = "\n---\n".join(chunks)[:limit]
+        if text.strip():
+            return text
+        return "Top-level workspace paths:\n" + "\n".join(self._top_level_paths())
+
+    def _bootstrap_rescue(self, turns: int) -> dict[str, Any] | None:
+        """ONE fresh micro-context bootstrap attempt after length truncation.
+
+        Returns the executed write result when it reports changed=True, else
+        None (fail-fast; the caller ends the run). A successful rescue merges
+        the assistant tool call + tool result into the main session transcript
+        so the primary agent keeps full provenance.
+        """
+        base = next(
+            (s for s in self.registry.schemas(allowed_names={"write"})), None
+        )
+        if base is None:
+            self.events.emit("bootstrap_rescue", outcome="skipped",
+                             reason="write tool unavailable")
+            return None
+        schema = json.loads(json.dumps(base))  # deep copy; never mutate SCHEMAS
+        try:
+            content_prop = schema["function"]["parameters"]["properties"]["content"]
+        except (KeyError, TypeError):
+            return None
+        content_prop["maxLength"] = BOOTSTRAP_WRITE_MAX_CHARS
+        content_prop["description"] = (
+            "Small scaffold chunk only, max "
+            f"{BOOTSTRAP_WRITE_MAX_CHARS} characters. Create the minimal valid "
+            "first artifact; do not complete the whole task."
+        )
+        rescue_messages = [
+            {"role": "system", "content": (
+                "You are MODAI Code Virtuoso. Execute exactly one bounded "
+                "bootstrap mutation. Use the provided write tool. Do not "
+                "complete the whole task in this turn."
+            )},
+            {"role": "user", "content": "OBJECTIVE\n" + self.task},
+            {"role": "user", "content": (
+                "KNOWN PRODUCT FACTS (clipped evidence, authoritative for names only):\n"
+                + self._rescue_evidence()
+            )},
+            {"role": "user", "content": (
+                "CURRENT SUBTASK\n"
+                "Create only the first small artifact.\n"
+                "For a web page:\n"
+                "- create index.html\n"
+                "- valid HTML scaffold only\n"
+                "- link styles.css\n"
+                "- no inline CSS\n"
+                f"- under {BOOTSTRAP_WRITE_MAX_CHARS} characters\n"
+                "- do not complete styling\n"
+                "- call write exactly once"
+            )},
+        ]
+        self._model_calls += 1
+        self.events.emit("model_started", turn=turns, attempt="rescue")
+        self.events.emit("bootstrap_rescue", outcome="attempted", turn=turns)
+        try:
+            rescue = self.runtime.generate(
+                rescue_messages, [schema],
+                on_text=lambda text: self.events.emit("text_delta", text=text),
+            )
+        except Exception as exc:
+            self.events.emit("bootstrap_rescue", outcome="failed",
+                             reason=f"{type(exc).__name__}: {exc}")
+            return None
+        self._record_usage(rescue)
+        calls = rescue.tool_calls or []
+        if len(calls) != 1 or calls[0].name != "write":
+            self.events.emit("bootstrap_rescue", outcome="failed",
+                             reason="no single write call",
+                             content_length=len(rescue.content),
+                             truncated=rescue.truncated)
+            return None
+        call = calls[0]
+        self._tool_calls += 1
+        self.events.emit("tool_started", name=call.name, arguments=call.arguments,
+                         rescue=True)
+        try:
+            result = self.registry.execute(call.name, call.arguments)
+        except Exception as exc:
+            result = {"error": f"{type(exc).__name__}: {exc}"}
+        assistant = self._assistant_message(rescue)
+        self._messages.append(assistant)
+        self._append(assistant)
+        tool_message = {
+            "role": "tool", "tool_call_id": call.id, "name": call.name,
+            "content": self.registry.model_result(result),
+        }
+        self._messages.append(tool_message)
+        self._append(tool_message)
+        self.events.emit("tool_finished", name=call.name,
+                         ok="error" not in result, result=result, rescue=True)
+        if not (isinstance(result, dict) and result.get("changed")):
+            self.events.emit("bootstrap_rescue", outcome="failed",
+                             reason="write reported no change")
+            return None
+        self.events.emit("bootstrap_rescue", outcome="succeeded",
+                         path=result.get("path"))
+        return result
+
     def _verification_message(self, report: Any, *, proactive: bool = False) -> dict[str, Any]:
         if report.verdict == "PASS":
             content = (
@@ -574,6 +704,8 @@ class CodingHarness:
         _force_implementation: bool = False
         _implementation_phase_reason: str | None = None
         _path_not_found_count: int = 0
+        # v4.1.4: single-shot bootstrap rescue (length-truncation only).
+        _bootstrap_rescue_attempted: bool = False
         self._pre_mutation_stats = {
             "pre_mutation_tool_calls": 0,
             "discovery_successes": 0,
@@ -725,6 +857,36 @@ class CodingHarness:
 
             # ── Empty response guard ──────────────────────────────────────────
             if not response.content.strip() and not response.tool_calls:
+                # v4.1.4 bootstrap rescue: a length-truncated empty response
+                # while waiting for the FIRST mutation means the model tried
+                # to emit the whole task at once. Retry the identical context
+                # has zero information value, so run ONE fresh micro-context
+                # asking only for a small bounded scaffold write. Transport
+                # failures, repair mode, and non-length empties keep their
+                # existing handling below.
+                if (
+                    _force_implementation
+                    and not self.coding_tools.mutated_paths
+                    and not _repair_mode
+                    and not _bootstrap_rescue_attempted
+                    and response.truncated
+                    and response.stop_reason == "length"
+                ):
+                    _bootstrap_rescue_attempted = True
+                    rescue_result = self._bootstrap_rescue(turns)
+                    if rescue_result is not None:
+                        _force_implementation = False
+                        if self._first_mutation_turn is None:
+                            self._first_mutation_turn = turns
+                        _path_not_found_streak = 0
+                        continue
+                    return self._result(
+                        "needs_attention",
+                        "Bootstrap rescue could not produce a bounded first write; "
+                        "session preserved for resume.",
+                        report,
+                        turns,
+                    )
                 empty_response_retries += 1
                 self.events.emit(
                     "empty_model_response", turn=turns, attempt=empty_response_retries,
