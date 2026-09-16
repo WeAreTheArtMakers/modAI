@@ -146,6 +146,9 @@ class CodingHarness:
             "path_not_found_count": 0,
             "implementation_phase_entered": False,
             "implementation_phase_reason": None,
+            "bootstrap_rescue_attempts": 0,
+            "bootstrap_size_corrections": 0,
+            "bootstrap_oversize_chars": None,
         }
         self._reduced_context_retry = False
         import inspect as _inspect
@@ -338,33 +341,93 @@ class CodingHarness:
             return text
         return "Top-level workspace paths:\n" + "\n".join(self._top_level_paths())
 
-    def _bootstrap_rescue(self, turns: int) -> dict[str, Any] | None:
-        """ONE fresh micro-context bootstrap attempt after length truncation.
+    def _capped_write_schema(self, description: str) -> dict[str, Any] | None:
+        """Write-only schema copy advertising the real hard maximum.
 
-        Returns the executed write result when it reports changed=True, else
-        None (fail-fast; the caller ends the run). A successful rescue merges
-        the assistant tool call + tool result into the main session transcript
-        so the primary agent keeps full provenance.
+        Deep-copied per call; the global SCHEMAS table is never mutated.
         """
         base = next(
             (s for s in self.registry.schemas(allowed_names={"write"})), None
         )
         if base is None:
-            self.events.emit("bootstrap_rescue", outcome="skipped",
-                             reason="write tool unavailable")
             return None
-        schema = json.loads(json.dumps(base))  # deep copy; never mutate SCHEMAS
+        schema = json.loads(json.dumps(base))
         try:
             content_prop = schema["function"]["parameters"]["properties"]["content"]
         except (KeyError, TypeError):
             return None
         content_prop["maxLength"] = MODEL_WRITE_MAX_CHARS
-        content_prop["description"] = (
+        content_prop["description"] = description
+        return schema
+
+    def _bootstrap_rescue(self, turns: int) -> dict[str, Any] | None:
+        """Fresh micro-context bootstrap after length truncation, plus ONE
+        size-correction pass for a completed-but-oversized write.
+
+        Returns the executed write result when it reports changed=True, else
+        None (fail-fast; the caller ends the run). Success merges the
+        assistant tool call + tool result into the main session transcript.
+        Only CONTENT_TOO_LARGE triggers the correction, and only once:
+        transport errors, repair mode, and non-write calls never enter it.
+        """
+        schema = self._capped_write_schema(
             "Create a small first artifact. Aim for roughly "
             f"{BOOTSTRAP_WRITE_TARGET_CHARS} characters. Hard maximum: "
             f"{MODEL_WRITE_MAX_CHARS} characters. Larger files must be "
             "continued in later write/append/edit calls."
         )
+        if schema is None:
+            self.events.emit("bootstrap_rescue", outcome="skipped",
+                             reason="write tool unavailable")
+            return None
+
+        def attempt(messages: list[dict[str, Any]], label: str) -> tuple[Any | None, Any | None, Any | None]:
+            """One generate + single-write execute + transcript merge.
+
+            Returns (response, call, result); result is None unless a single
+            write call executed. Merges nothing unless a write executed.
+            """
+            self._model_calls += 1
+            self._pre_mutation_stats["bootstrap_rescue_attempts"] += 1
+            self.events.emit("model_started", turn=turns, attempt=label)
+            try:
+                response = self.runtime.generate(
+                    messages, [schema],
+                    on_text=lambda text: self.events.emit("text_delta", text=text),
+                )
+            except Exception as exc:
+                self.events.emit("bootstrap_rescue", outcome="failed",
+                                 reason=f"{type(exc).__name__}: {exc}")
+                return None, None, None
+            self._record_usage(response)
+            calls = response.tool_calls or []
+            if len(calls) != 1 or calls[0].name != "write":
+                self.events.emit("bootstrap_rescue", outcome="failed",
+                                 reason="no single write call",
+                                 content_length=len(response.content),
+                                 truncated=response.truncated)
+                return response, None, None
+            call = calls[0]
+            self._tool_calls += 1
+            self.events.emit("tool_started", name=call.name, arguments=call.arguments,
+                             rescue=True)
+            try:
+                result = self.registry.execute(call.name, call.arguments)
+            except Exception as exc:
+                result = {"error": f"{type(exc).__name__}: {exc}"}
+            assistant = self._assistant_message(response)
+            self._messages.append(assistant)
+            self._append(assistant)
+            tool_message = {
+                "role": "tool", "tool_call_id": call.id, "name": call.name,
+                "content": self.registry.model_result(result),
+            }
+            self._messages.append(tool_message)
+            self._append(tool_message)
+            self.events.emit("tool_finished", name=call.name,
+                             ok="error" not in result, result=result, rescue=True)
+            return response, call, result
+
         rescue_messages = [
             {"role": "system", "content": (
                 "You are MODAI Code Virtuoso. Execute exactly one bounded "
@@ -392,52 +455,59 @@ class CodingHarness:
                 "- call write exactly once"
             )},
         ]
-        self._model_calls += 1
-        self.events.emit("model_started", turn=turns, attempt="rescue")
         self.events.emit("bootstrap_rescue", outcome="attempted", turn=turns)
-        try:
-            rescue = self.runtime.generate(
-                rescue_messages, [schema],
-                on_text=lambda text: self.events.emit("text_delta", text=text),
-            )
-        except Exception as exc:
-            self.events.emit("bootstrap_rescue", outcome="failed",
-                             reason=f"{type(exc).__name__}: {exc}")
-            return None
-        self._record_usage(rescue)
-        calls = rescue.tool_calls or []
-        if len(calls) != 1 or calls[0].name != "write":
-            self.events.emit("bootstrap_rescue", outcome="failed",
-                             reason="no single write call",
-                             content_length=len(rescue.content),
-                             truncated=rescue.truncated)
-            return None
-        call = calls[0]
-        self._tool_calls += 1
-        self.events.emit("tool_started", name=call.name, arguments=call.arguments,
-                         rescue=True)
-        try:
-            result = self.registry.execute(call.name, call.arguments)
-        except Exception as exc:
-            result = {"error": f"{type(exc).__name__}: {exc}"}
-        assistant = self._assistant_message(rescue)
-        self._messages.append(assistant)
-        self._append(assistant)
-        tool_message = {
-            "role": "tool", "tool_call_id": call.id, "name": call.name,
-            "content": self.registry.model_result(result),
-        }
-        self._messages.append(tool_message)
-        self._append(tool_message)
-        self.events.emit("tool_finished", name=call.name,
-                         ok="error" not in result, result=result, rescue=True)
-        if not (isinstance(result, dict) and result.get("changed")):
+        _, _, result = attempt(rescue_messages, "rescue")
+        if isinstance(result, dict) and result.get("changed"):
+            self.events.emit("bootstrap_rescue", outcome="succeeded",
+                             path=result.get("path"))
+            return result
+        # v4.1.5: exactly ONE size-correction pass for a completed write that
+        # overshot the hard limit. The rejected content is NOT fed back —
+        # only its size — so the retry cannot re-derive the same overshoot.
+        if not (isinstance(result, dict)
+                and result.get("error_code") == "CONTENT_TOO_LARGE"
+                and self._pre_mutation_stats["bootstrap_size_corrections"] == 0):
             self.events.emit("bootstrap_rescue", outcome="failed",
                              reason="write reported no change")
             return None
-        self.events.emit("bootstrap_rescue", outcome="succeeded",
-                         path=result.get("path"))
-        return result
+        actual = int(result.get("actual_chars", 0) or 0)
+        self._pre_mutation_stats["bootstrap_size_corrections"] = 1
+        self._pre_mutation_stats["bootstrap_oversize_chars"] = actual
+        self.events.emit("bootstrap_size_correction", outcome="attempted",
+                         actual_chars=actual, hard_max=MODEL_WRITE_MAX_CHARS, turn=turns)
+        correction_messages = [
+            {"role": "system", "content": (
+                "You are MODAI Code Virtuoso. Execute exactly one bounded "
+                "bootstrap mutation. Use the provided write tool."
+            )},
+            {"role": "user", "content": "OBJECTIVE\n" + self.task},
+            {"role": "user", "content": (
+                "BOOTSTRAP SIZE CORRECTION\n\n"
+                f"Your previous write call was {actual} characters.\n"
+                f"The hard maximum is {MODEL_WRITE_MAX_CHARS} characters.\n\n"
+                "Create the same FIRST ARTIFACT again, but only as a minimal "
+                "valid scaffold.\n\n"
+                "Requirements:\n"
+                "- aim for 2000 characters or less\n"
+                f"- hard maximum {MODEL_WRITE_MAX_CHARS}\n"
+                "- omit optional sections, detailed copy, comments, decoration "
+                "and secondary content\n"
+                "- preserve only the minimum structure needed to continue the task\n"
+                "- do not complete the application\n"
+                "- call write exactly once"
+            )},
+        ]
+        _, _, corrected = attempt(correction_messages, "size-correction")
+        if isinstance(corrected, dict) and corrected.get("changed"):
+            self.events.emit("bootstrap_size_correction", outcome="succeeded",
+                             path=corrected.get("path"))
+            self.events.emit("bootstrap_rescue", outcome="succeeded",
+                             path=corrected.get("path"), via="size-correction")
+            return corrected
+        self.events.emit("bootstrap_size_correction", outcome="failed")
+        self.events.emit("bootstrap_rescue", outcome="failed",
+                         reason="size correction produced no change")
+        return None
 
     def _verification_message(self, report: Any, *, proactive: bool = False) -> dict[str, Any]:
         if report.verdict == "PASS":
@@ -717,6 +787,9 @@ class CodingHarness:
             "path_not_found_count": 0,
             "implementation_phase_entered": False,
             "implementation_phase_reason": None,
+            "bootstrap_rescue_attempts": 0,
+            "bootstrap_size_corrections": 0,
+            "bootstrap_oversize_chars": None,
         }
 
         # Bash circuit-breaker
@@ -1150,6 +1223,12 @@ class CodingHarness:
                         "path_not_found_count": _path_not_found_count,
                         "implementation_phase_entered": _force_implementation,
                         "implementation_phase_reason": _implementation_phase_reason,
+                        "bootstrap_rescue_attempts": self._pre_mutation_stats.get(
+                            "bootstrap_rescue_attempts", 0),
+                        "bootstrap_size_corrections": self._pre_mutation_stats.get(
+                            "bootstrap_size_corrections", 0),
+                        "bootstrap_oversize_chars": self._pre_mutation_stats.get(
+                            "bootstrap_oversize_chars"),
                     }
 
                 # Progress / stall tracking
