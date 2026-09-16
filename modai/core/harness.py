@@ -55,6 +55,14 @@ class HarnessResult:
     metrics: dict[str, Any]
 
 
+# v4.1: harness-internal paths stay out of model-facing discovery
+# (project snapshot, ls/find listings, PATH_NOT_FOUND guidance).
+_INTERNAL_PATHS = frozenset({
+    ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache",
+    ".modai", ".benchmark_run", ".run", "dist", "build", "coverage",
+})
+
+
 class CodingHarness:
     def __init__(
         self,
@@ -246,6 +254,10 @@ class CodingHarness:
                 "timeout", "timed out", "temporarily unavailable", "connection reset",
                 "server disconnected", "remote protocol", "broken pipe", "eof",
                 "status code: 502", "status code: 503", "status code: 504",
+                # v4.1: Ollama transport drops (chunked-read teardown) recover
+                # via compact + reduced-context retry instead of killing the run.
+                "remoteprotocolerror", "incomplete chunked read",
+                "peer closed connection", "incomplete message body",
             )
         )
 
@@ -254,6 +266,34 @@ class CodingHarness:
         self.session.append({"type": "verification", "report": report.as_dict()})
         self.events.emit("verification_finished", **report.as_dict())
         return report
+
+    @staticmethod
+    def _is_useful_discovery(name: str, ok: bool, result: Any) -> bool:
+        """v4.1: only successful discovery carrying real content consumes budget.
+
+        Failed reads (FileNotFoundError, empty results) are not evidence.
+        """
+        if not ok or name not in {"read", "grep", "find", "ls"}:
+            return False
+        if not isinstance(result, dict) or "error" in result or "error_code" in result:
+            return False
+        if name == "read":
+            return bool(str(result.get("content", "")).strip())
+        if name == "grep":
+            return bool(str(result.get("matches", "")).strip())
+        return bool(result.get("entries") or result.get("matches"))
+
+    def _top_level_paths(self, limit: int = 20) -> list[str]:
+        """Real top-level entries for PATH_NOT_FOUND guidance (internals hidden)."""
+        try:
+            entries = sorted(
+                entry.name + ("/" if entry.is_dir() else "")
+                for entry in self.workspace.iterdir()
+                if entry.name not in _INTERNAL_PATHS
+            )
+        except OSError:
+            return []
+        return entries[:limit]
 
     def _verification_message(self, report: Any, *, proactive: bool = False) -> dict[str, Any]:
         if report.verdict == "PASS":
@@ -510,9 +550,12 @@ class CodingHarness:
         turns = 0
         empty_response_retries = 0
 
-        # Exploration budget: max 2 discovery batches before first mutation
-        _exploration_batches: int = 0
-        _MAX_EXPLORATION_BATCHES: int = 2
+        # v4.1 pre-mutation reliability: count only SUCCESSFUL discovery.
+        # Failed reads (missing paths) are not evidence and cost no budget.
+        _discovery_successes: int = 0
+        _MAX_DISCOVERY_SUCCESSES: int = 2
+        # Missing-path loop guard: consecutive PATH_NOT_FOUND closes discovery.
+        _path_not_found_streak: int = 0
 
         # Bash circuit-breaker
         _bash_policy_errors: int = 0
@@ -565,7 +608,10 @@ class CodingHarness:
                     )
 
             # ── Active schema selection ────────────────────────────────────────
-            _write_core: set[str] = {"write", "edit", "read"}
+            # v4.1: after discovery, implementation-only tools (write/edit).
+            # read stays open during discovery only; the preserved-run trace
+            # showed budget-exhausted read looping over hallucinated paths.
+            _IMPLEMENTATION_ONLY: set[str] = {"write", "edit"}
             # Targeted repair: read+grep+edit (no write, no bash)
             _repair_targeted: set[str] = {"read", "grep", "edit"}
             # Structural repair: read+grep+edit+write (missing files)
@@ -575,11 +621,11 @@ class CodingHarness:
                 _allowed: set[str] | None = (
                     _repair_struct if _repair_structural else _repair_targeted
                 )
-            elif (
-                not self.coding_tools.mutated_paths
-                and _exploration_batches >= _MAX_EXPLORATION_BATCHES
+            elif not self.coding_tools.mutated_paths and (
+                _discovery_successes >= _MAX_DISCOVERY_SUCCESSES
+                or _path_not_found_streak >= 2
             ):
-                _allowed = _write_core
+                _allowed = _IMPLEMENTATION_ONLY
             else:
                 _allowed = None  # full policy-filtered schema
 
@@ -707,6 +753,7 @@ class CodingHarness:
                 last_tool_name = ""
                 last_args: dict[str, Any] = {}
                 _batch_has_mutation = False
+                _batch_discovery_success = False
 
                 for call in response.tool_calls:
                     self._tool_calls += 1
@@ -717,6 +764,27 @@ class CodingHarness:
                     except Exception as exc:
                         result = {"error": f"{type(exc).__name__}: {exc}"}
                         ok = False
+
+                        # v4.1 missing-path guard: never retryable; answer with
+                        # the real top-level tree so the model cannot invent
+                        # alternative paths.
+                        if call.name in {"read", "grep", "ls", "find"}:
+                            _err_text = str(result.get("error", ""))
+                            if ("FileNotFoundError" in _err_text
+                                    or "IsADirectoryError" in _err_text):
+                                _path_not_found_streak += 1
+                                result = {
+                                    "error": _err_text,
+                                    "error_code": "PATH_NOT_FOUND",
+                                    "path": str(call.arguments.get(
+                                        "path", call.arguments.get("pattern", "?"))),
+                                    "retryable": False,
+                                    "available_relevant_paths": self._top_level_paths(),
+                                    "instruction": (
+                                        "Do not invent alternative paths. "
+                                        "Use existing evidence or implement."
+                                    ),
+                                }
 
                         # Bash circuit-breaker
                         if call.name == "bash":
@@ -790,9 +858,13 @@ class CodingHarness:
                         if self._first_mutation_turn is None:
                             self._first_mutation_turn = turns
                         _batch_has_mutation = True
+                        _path_not_found_streak = 0
                         if _repair_mode:
                             # Any successful mutation resets bash error counter too
                             _bash_policy_errors = 0
+                    if self._is_useful_discovery(call.name, ok, result):
+                        _batch_discovery_success = True
+                        _path_not_found_streak = 0
                     last_tool_name = call.name
                     last_args = dict(call.arguments)
 
@@ -820,23 +892,26 @@ class CodingHarness:
                 if _batch_has_mutation and not _repair_mode:
                     _bash_policy_errors = 0  # successful write resets circuit
 
-                # Exploration batch tracking
+                # v4.1: only successful discovery consumes budget; failed
+                # reads cost nothing. Emit the implementation nudge once.
                 if not self.coding_tools.mutated_paths:
-                    _exploration_batches += 1
-                    if _exploration_batches == _MAX_EXPLORATION_BATCHES:
-                        nudge = {
-                            "role": "user",
-                            "content": (
-                                "EXPLORATION BUDGET: you have used your 2 discovery turns. "
-                                "You must now implement: call write() to create the required files. "
-                                "bash, grep, find, and ls are temporarily disabled until you write a file."
-                            ),
-                        }
-                        self._messages.append(nudge)
-                        self._append(nudge)
-                        self.events.emit(
-                            "exploration_budget_exhausted", batches=_exploration_batches
-                        )
+                    if _batch_discovery_success:
+                        _discovery_successes += 1
+                        if _discovery_successes == _MAX_DISCOVERY_SUCCESSES:
+                            nudge = {
+                                "role": "user",
+                                "content": (
+                                    "IMPLEMENTATION PHASE: discovery is complete. "
+                                    "Do not inspect additional files. "
+                                    "Create the requested artifact now using write(). "
+                                    "The repository information already collected is sufficient."
+                                ),
+                            }
+                            self._messages.append(nudge)
+                            self._append(nudge)
+                            self.events.emit(
+                                "exploration_budget_exhausted", batches=_discovery_successes
+                            )
 
                 # Progress / stall tracking
                 current_progress = self._progress_hash(last_tool_name, last_args)

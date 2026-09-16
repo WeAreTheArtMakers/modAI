@@ -55,7 +55,9 @@ def requires_artifact_change(task: str) -> bool:
 def project_snapshot(workspace: Path, limit: int = 160) -> str:
     files: list[str] = []
     for item in sorted(workspace.rglob("*")):
-        if any(part in {".git", ".venv", "node_modules", "__pycache__", ".modai"} for part in item.parts):
+        # v4.1: harness-internal paths stay out of model-facing discovery.
+        if any(part in {".git", ".venv", "node_modules", "__pycache__", ".pytest_cache",
+                        ".modai", ".benchmark_run", ".run"} for part in item.parts):
             continue
         files.append(str(item.relative_to(workspace)) + ("/" if item.is_dir() else ""))
         if len(files) >= limit:

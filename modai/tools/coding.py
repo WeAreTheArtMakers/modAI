@@ -68,7 +68,9 @@ class CodingTools:
         for item in sorted(target.rglob("*")):
             if len(item.parts) - base_parts > max(1, min(int(depth), 6)):
                 continue
-            if any(part in {".git", "node_modules", ".venv", "__pycache__", ".modai",
+            # v4.1: harness-internal paths stay out of model-facing discovery.
+            if any(part in {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache",
+                            ".modai", ".benchmark_run", ".run",
                             "dist", "build", "coverage"} for part in item.parts):
                 continue
             entries.append(self._relative(item) + ("/" if item.is_dir() else ""))
@@ -78,7 +80,9 @@ class CodingTools:
 
     def find(self, pattern: str = "*", path: str = ".", limit: int = 200) -> dict[str, Any]:
         target = self._path(path, must_exist=True)
-        ignored = {".git", "node_modules", ".venv", "__pycache__", ".modai", "dist", "build", "coverage"}
+        # v4.1: harness-internal paths stay out of model-facing discovery.
+        ignored = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache",
+                   ".modai", ".benchmark_run", ".run", "dist", "build", "coverage"}
         matches = [self._relative(item) for item in sorted(target.rglob(pattern))
                    if not ignored.intersection(item.parts)][:limit]
         return {"pattern": pattern, "matches": matches, "truncated": len(matches) >= limit}
