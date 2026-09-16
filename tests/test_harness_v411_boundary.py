@@ -236,3 +236,44 @@ def test_benchmark_trace_lives_outside_workspace():
         physical = {p.name for p in ws.rglob("*")}
         assert "session.jsonl" not in physical
         assert "benchmark_result.json" not in physical
+
+
+# ── v4.1.2: incremental-write guidance + emission telemetry ──────────────────
+
+def test_implementation_nudge_steers_incremental_writes():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        (root / "README.md").write_text("# MODAI\n")
+        agent = _harness(root, [
+            ModelResponse(tool_calls=[_call(1, "read", path="README.md")], usage=Usage(60, 8)),
+            ModelResponse(tool_calls=[_call(2, "read", path="README.md")], usage=Usage(60, 8)),
+            ModelResponse(tool_calls=[_call(3, "write", path="notes-out.md", content="# out\n")],
+                          usage=Usage(90, 20)),
+            ModelResponse(content="Done.", usage=Usage(70, 10)),
+        ])
+        assert agent.run().status == "completed"
+        history = json.dumps(agent.runtime.requests, ensure_ascii=False)
+        assert "in a separate tool call" in history
+        assert "oversized tool call" in history
+
+
+def test_empty_response_event_carries_emission_telemetry():
+    with tempfile.TemporaryDirectory() as d:
+        root = Path(d)
+        (root / "README.md").write_text("# MODAI\n")
+        events: list = []
+        agent = _harness(root, [
+            ModelResponse(content="", tool_calls=[], usage=Usage(100, 2048),
+                          stop_reason="length", truncated=True),
+            ModelResponse(tool_calls=[_call(1, "write", path="notes-out.md", content="# out\n")],
+                          usage=Usage(90, 20)),
+            ModelResponse(content="Done.", usage=Usage(70, 10)),
+        ], event=events.append)
+        assert agent.run().status == "completed"
+        empties = [e for e in events if e.kind == "empty_model_response"]
+        assert len(empties) == 1
+        data = empties[0].data
+        assert data["truncated"] is True
+        assert data["stop_reason"] == "length"
+        assert data["output_tokens"] == 2048
+        assert data["content_length"] == 0

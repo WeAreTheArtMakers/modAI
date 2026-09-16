@@ -725,7 +725,16 @@ class CodingHarness:
             if not response.content.strip() and not response.tool_calls:
                 empty_response_retries += 1
                 self.events.emit(
-                    "empty_model_response", turn=turns, attempt=empty_response_retries
+                    "empty_model_response", turn=turns, attempt=empty_response_retries,
+                    # v4.1.2 emission telemetry: distinguishes "hit output cap,
+                    # tool call cut mid-serialization" (output_tokens ~= cap,
+                    # truncated=True) from "backend empty/malformed response".
+                    content_length=len(response.content),
+                    tool_call_count=len(response.tool_calls),
+                    truncated=response.truncated,
+                    stop_reason=response.stop_reason,
+                    output_tokens=response.usage.output_tokens,
+                    input_tokens=response.usage.input_tokens,
                 )
                 if empty_response_retries <= 3:
                     self._reduced_context_retry = True
@@ -952,11 +961,13 @@ class CodingHarness:
                                 "content": (
                                     "IMPLEMENTATION PHASE\n\n"
                                     "Repository inspection is complete.\n"
-                                    "The current workspace tree is authoritative.\n"
-                                    "Do not search for additional files.\n"
-                                    "Create the requested artifact now using write().\n"
-                                    "Only mutation tools are available until the first "
-                                    "successful repository change."
+                                    "Create the artifact now.\n\n"
+                                    "For non-trivial web pages:\n"
+                                    "1. write a small valid index.html structure first;\n"
+                                    "2. write styles.css in a separate tool call;\n"
+                                    "3. continue with targeted edits.\n\n"
+                                    "Do not attempt to emit the entire application "
+                                    "in one oversized tool call."
                                 ),
                             }
                             self._messages.append(nudge)
