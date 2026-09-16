@@ -80,7 +80,16 @@ concise final summary so the harness can run deterministic verification.\
 """
 
 
-def run_benchmark(workspace: Path, label: str) -> dict:
+def resolve_trace_dir(workspace: Path) -> Path:
+    """Benchmark instrumentation lives OUTSIDE the evaluated workspace.
+
+    The model-facing project tree must never contain session files, logs,
+    or benchmark results (raw bash can see through tool-level hiding).
+    """
+    return workspace.parent / f"{workspace.name}_trace"
+
+
+def run_benchmark(workspace: Path, label: str, trace_dir: Path | None = None) -> dict:
     settings = load_settings()
 
     route = TaskRouter().route(BENCHMARK_PROMPT, settings.harness_mode)
@@ -104,8 +113,9 @@ def run_benchmark(workspace: Path, label: str) -> dict:
         stream=settings.stream_output,
     )
 
-    run_dir = workspace / ".benchmark_run"
+    run_dir = trace_dir or resolve_trace_dir(workspace)
     run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "logs").mkdir(parents=True, exist_ok=True)
 
     events: list = []
     harness = CodingHarness(
@@ -128,6 +138,7 @@ def run_benchmark(workspace: Path, label: str) -> dict:
     print(f"  MODAI Landing-Page Benchmark  [{label}]")
     print(f"  mode={route.mode}  model={settings.model}")
     print(f"  workspace={workspace}")
+    print(f"  trace_dir={run_dir}")
     print(f"{'='*60}\n")
 
     wall_start = time.monotonic()
@@ -143,6 +154,10 @@ def run_benchmark(workspace: Path, label: str) -> dict:
     repair_rounds = 0
     empty_responses = 0
     no_progress_guards = 0
+    transport_retries = 0
+    failed_tool_calls = 0
+    path_not_found_events = 0
+    implementation_phase_reason: str | None = None
     first_mutation_turn: int | None = result.metrics.get("first_mutation_turn")
 
     for ev in events:
@@ -158,16 +173,24 @@ def run_benchmark(workspace: Path, label: str) -> dict:
                 reads_by_path[path] += 1
         elif k == "tool_finished":
             r = d.get("result", {})
+            if not d.get("ok", True):
+                failed_tool_calls += 1
             if isinstance(r, dict) and r.get("changed"):
                 p = r.get("path", "?")
                 if p not in files_changed:
                     files_changed.append(p)
+            if isinstance(r, dict) and r.get("error_code") == "PATH_NOT_FOUND":
+                path_not_found_events += 1
         elif k == "verification_finished":
             verify_count += 1
         elif k == "empty_model_response":
             empty_responses += 1
         elif k == "no_progress":
             no_progress_guards += 1
+        elif k == "model_retry":
+            transport_retries += 1
+        elif k == "implementation_phase_entered":
+            implementation_phase_reason = d.get("reason", "?")
 
     # repair rounds ≈ turns where model returned no tools AND verify failed
     # (approximate: result.metrics doesn't track this directly)
@@ -207,6 +230,13 @@ def run_benchmark(workspace: Path, label: str) -> dict:
             pass
         print(f"    {p}{sz}")
     print(f"  DUPLICATE READS     {duplicate_reads}")
+    print(f"  FAILED TOOL CALLS   {failed_tool_calls}")
+    print(f"  PATH_NOT_FOUND      {path_not_found_events}")
+    print(sep)
+    print(f"  PRE-MUTATION TOOLS  {result.metrics.get('pre_mutation_tool_calls', '?')}")
+    print(f"  DISCOVERY SUCCESSES {result.metrics.get('discovery_successes', '?')}")
+    print(f"  IMPL PHASE          {implementation_phase_reason or 'not entered'}")
+    print(f"  TRANSPORT RETRIES   {transport_retries}")
     print(sep)
     print(f"  VERIFICATION CALLS  {verify_count}")
     print(f"  REPAIR ROUNDS       {repair_rounds}")
@@ -255,7 +285,18 @@ def run_benchmark(workspace: Path, label: str) -> dict:
         "first_mutation_turn": first_mutation_turn,
         "files_read": files_read,
         "duplicate_reads": duplicate_reads,
+        "failed_tool_calls": failed_tool_calls,
+        "path_not_found_count": result.metrics.get(
+            "path_not_found_count", path_not_found_events),
         "files_changed": files_changed,
+        "pre_mutation_tool_calls": result.metrics.get("pre_mutation_tool_calls"),
+        "discovery_successes": result.metrics.get("discovery_successes"),
+        "implementation_phase_entered": result.metrics.get(
+            "implementation_phase_entered",
+            implementation_phase_reason is not None),
+        "implementation_phase_reason": result.metrics.get(
+            "implementation_phase_reason", implementation_phase_reason),
+        "transport_retries": transport_retries,
         "verification_calls": verify_count,
         "repair_rounds": repair_rounds,
         "empty_responses": empty_responses,
@@ -279,7 +320,9 @@ def run_benchmark(workspace: Path, label: str) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description="MODAI Landing-Page Benchmark")
     parser.add_argument("--workspace", default=None,
-                        help="Directory to use as workspace (default: fresh temp dir)")
+                        help="Directory to use as workspace (default: persistent /tmp dir)")
+    parser.add_argument("--trace-dir", default=None,
+                        help="Directory for session/logs/result (default: <workspace>_trace)")
     parser.add_argument("--label", default="no-skills",
                         help="Label for this run (e.g. 'no-skills', 'with-skills')")
     args = parser.parse_args()
@@ -287,18 +330,33 @@ def main() -> None:
     if args.workspace:
         ws = Path(args.workspace).expanduser().resolve()
         ws.mkdir(parents=True, exist_ok=True)
-        run_benchmark(ws, label=args.label)
     else:
-        with tempfile.TemporaryDirectory(prefix="modai_bench_") as tmp:
-            ws = Path(tmp)
-            # Copy README and a few key source files into the temp workspace
-            # so the model can read real MODAI context
-            repo_root = Path(__file__).resolve().parent.parent
-            for name in ("README.md", "THIRD_PARTY_NOTICES.md"):
-                src = repo_root / name
-                if src.exists():
-                    (ws / name).write_bytes(src.read_bytes())
-            run_benchmark(ws, label=args.label)
+        # Persistent (never auto-deleted): the trace must survive for postmortem.
+        ws = Path(tempfile.mkdtemp(prefix="modai_bench_"))
+        # Copy README and a few key source files into the workspace
+        # so the model can read real MODAI context
+        repo_root = Path(__file__).resolve().parent.parent
+        for name in ("README.md", "THIRD_PARTY_NOTICES.md"):
+            src = repo_root / name
+            if src.exists():
+                (ws / name).write_bytes(src.read_bytes())
+    trace_dir = (Path(args.trace_dir).expanduser().resolve()
+                 if args.trace_dir else resolve_trace_dir(ws))
+    trace_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = run_benchmark(ws, label=args.label, trace_dir=trace_dir)
+
+    session_path = trace_dir / "session.jsonl"
+    result_path = trace_dir / "benchmark_result.json"
+    print("WORKSPACE:")
+    print(f"  {ws}")
+    print("TRACE DIRECTORY:")
+    print(f"  {trace_dir}")
+    print("SESSION:")
+    print(f"  {session_path}  (exists={session_path.is_file()})")
+    print("RESULT:")
+    print(f"  {result_path}  (exists={result_path.is_file()})")
+    print(f"  status={summary.get('status')} verdict={summary.get('verdict')}")
 
 
 if __name__ == "__main__":

@@ -133,6 +133,13 @@ class CodingHarness:
         self._tool_calls = 0
         self._model_calls = 0
         self._first_mutation_turn: int | None = None
+        self._pre_mutation_stats: dict[str, Any] = {
+            "pre_mutation_tool_calls": 0,
+            "discovery_successes": 0,
+            "path_not_found_count": 0,
+            "implementation_phase_entered": False,
+            "implementation_phase_reason": None,
+        }
         self._reduced_context_retry = False
         import inspect as _inspect
         self._runtime_reduced_ctx: bool = (
@@ -556,6 +563,22 @@ class CodingHarness:
         _MAX_DISCOVERY_SUCCESSES: int = 2
         # Missing-path loop guard: consecutive PATH_NOT_FOUND closes discovery.
         _path_not_found_streak: int = 0
+        # v4.1.1 hard pre-mutation boundary: no amount of tool-switching
+        # (read/grep/find/ls/bash/...) may delay the first mutation past
+        # this many executed pre-mutation tool calls. Discovery-success
+        # telemetry above is kept; this is an additional escape hatch.
+        _PRE_MUTATION_TOOL_LIMIT: int = 3
+        _pre_mutation_tool_calls: int = 0
+        _force_implementation: bool = False
+        _implementation_phase_reason: str | None = None
+        _path_not_found_count: int = 0
+        self._pre_mutation_stats = {
+            "pre_mutation_tool_calls": 0,
+            "discovery_successes": 0,
+            "path_not_found_count": 0,
+            "implementation_phase_entered": False,
+            "implementation_phase_reason": None,
+        }
 
         # Bash circuit-breaker
         _bash_policy_errors: int = 0
@@ -621,10 +644,7 @@ class CodingHarness:
                 _allowed: set[str] | None = (
                     _repair_struct if _repair_structural else _repair_targeted
                 )
-            elif not self.coding_tools.mutated_paths and (
-                _discovery_successes >= _MAX_DISCOVERY_SUCCESSES
-                or _path_not_found_streak >= 2
-            ):
+            elif _force_implementation and not self.coding_tools.mutated_paths:
                 _allowed = _IMPLEMENTATION_ONLY
             else:
                 _allowed = None  # full policy-filtered schema
@@ -773,6 +793,7 @@ class CodingHarness:
                             if ("FileNotFoundError" in _err_text
                                     or "IsADirectoryError" in _err_text):
                                 _path_not_found_streak += 1
+                                _path_not_found_count += 1
                                 result = {
                                     "error": _err_text,
                                     "error_code": "PATH_NOT_FOUND",
@@ -859,6 +880,9 @@ class CodingHarness:
                             self._first_mutation_turn = turns
                         _batch_has_mutation = True
                         _path_not_found_streak = 0
+                        # v4.1.1: first mutation lifts the hard pre-mutation
+                        # boundary; normal tool policy resumes afterwards.
+                        _force_implementation = False
                         if _repair_mode:
                             # Any successful mutation resets bash error counter too
                             _bash_policy_errors = 0
@@ -892,26 +916,58 @@ class CodingHarness:
                 if _batch_has_mutation and not _repair_mode:
                     _bash_policy_errors = 0  # successful write resets circuit
 
-                # v4.1: only successful discovery consumes budget; failed
-                # reads cost nothing. Emit the implementation nudge once.
+                # v4.1.1 hard pre-mutation boundary. Every executed tool call
+                # before the first mutation counts — successes and failures
+                # alike, across read/grep/find/ls/bash/etc. Discovery-success
+                # telemetry is kept; this is the escape hatch that tool
+                # switching cannot bypass.
                 if not self.coding_tools.mutated_paths:
                     if _batch_discovery_success:
                         _discovery_successes += 1
                         if _discovery_successes == _MAX_DISCOVERY_SUCCESSES:
+                            self.events.emit(
+                                "exploration_budget_exhausted", batches=_discovery_successes
+                            )
+                    _pre_mutation_tool_calls += len(response.tool_calls)
+                    if not _force_implementation:
+                        if _discovery_successes >= _MAX_DISCOVERY_SUCCESSES:
+                            _implementation_phase_reason = "discovery_budget"
+                        elif _path_not_found_streak >= 2:
+                            _implementation_phase_reason = "path_not_found_limit"
+                        elif _pre_mutation_tool_calls >= _PRE_MUTATION_TOOL_LIMIT:
+                            _implementation_phase_reason = "pre_mutation_tool_limit"
+                        else:
+                            _implementation_phase_reason = None
+                        if _implementation_phase_reason is not None:
+                            _force_implementation = True
+                            self.events.emit(
+                                "implementation_phase_entered",
+                                reason=_implementation_phase_reason,
+                                pre_mutation_tool_calls=_pre_mutation_tool_calls,
+                                discovery_successes=_discovery_successes,
+                                path_not_found_streak=_path_not_found_streak,
+                            )
                             nudge = {
                                 "role": "user",
                                 "content": (
-                                    "IMPLEMENTATION PHASE: discovery is complete. "
-                                    "Do not inspect additional files. "
-                                    "Create the requested artifact now using write(). "
-                                    "The repository information already collected is sufficient."
+                                    "IMPLEMENTATION PHASE\n\n"
+                                    "Repository inspection is complete.\n"
+                                    "The current workspace tree is authoritative.\n"
+                                    "Do not search for additional files.\n"
+                                    "Create the requested artifact now using write().\n"
+                                    "Only mutation tools are available until the first "
+                                    "successful repository change."
                                 ),
                             }
                             self._messages.append(nudge)
                             self._append(nudge)
-                            self.events.emit(
-                                "exploration_budget_exhausted", batches=_discovery_successes
-                            )
+                    self._pre_mutation_stats = {
+                        "pre_mutation_tool_calls": _pre_mutation_tool_calls,
+                        "discovery_successes": _discovery_successes,
+                        "path_not_found_count": _path_not_found_count,
+                        "implementation_phase_entered": _force_implementation,
+                        "implementation_phase_reason": _implementation_phase_reason,
+                    }
 
                 # Progress / stall tracking
                 current_progress = self._progress_hash(last_tool_name, last_args)
@@ -1005,6 +1061,8 @@ class CodingHarness:
             "tool_calls": self._tool_calls,
             "first_mutation_turn": self._first_mutation_turn,
             "verification_attempts": int(verification.get("sequence", 0) or 0),
+            # v4.1.1 pre-mutation telemetry (observation only).
+            **getattr(self, "_pre_mutation_stats", {}),
             "verified_artifacts_per_10k_tokens": round(
                 (
                     len(self.coding_tools.mutated_paths)
