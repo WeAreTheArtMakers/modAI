@@ -24,6 +24,7 @@ def main() -> None:
     parser.add_argument('--task', default='Create a modern responsive MODAI landing page in index.html with inline CSS. Read PRODUCT.md for actual product facts. No fabricated claims, pricing or testimonials. Include navigation to #features, a clear install CTA and three actual features. Keep it lightweight; implement and validate it.')
     parser.add_argument('--no-visual-review', action='store_true')
     parser.add_argument('--repair-fixture', action='store_true', help='Repair an existing static page with a reproducible mobile overflow')
+    parser.add_argument('--report', type=Path, help='Save machine-readable model timing and verification evidence')
     args = parser.parse_args()
     root = Path(tempfile.mkdtemp(prefix='modai-live-benchmark-'))
     # Reproducible facts, never a copy of private workspace data.
@@ -62,12 +63,16 @@ performance guarantees or testimonials. Install: clone repository, ./setup.sh,
     except KeyboardInterrupt:
         print('Benchmark interrupted; reporting checkpoint instead of claiming completion.', flush=True)
     state = json.loads(next((root / 'runs').glob('*/state.json')).read_text())
-    print(json.dumps({'workspace': str(root), 'first_write_seconds': first_write,
+    report = {'workspace': str(root), 'model': args.model, 'first_write_seconds': first_write,
                       'wall_seconds': round(time.monotonic()-started, 2),
                       'status': state['status'], 'usage': state['usage'],
                       'changed_paths': state.get('changed_paths', []),
                       'verification': state.get('verification', {}),
-                      'metrics': state.get('metrics', {})}, indent=2), flush=True)
+                      'metrics': state.get('metrics', {})}
+    if args.report:
+        args.report.parent.mkdir(parents=True, exist_ok=True)
+        args.report.write_text(json.dumps(report, indent=2), encoding='utf-8')
+    print(json.dumps(report, indent=2), flush=True)
 
 
 if __name__ == '__main__':

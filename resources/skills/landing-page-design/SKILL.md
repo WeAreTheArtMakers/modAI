@@ -13,4 +13,4 @@ Load references only for the problem you face via load_skill(name="landing-page-
 - [Typography](references/typography.md): font sizing or dense copy.
 - [Responsive layout](references/responsive-layout.md): narrow or landscape layout.
 - [Anti-patterns](references/anti-patterns.md): fabricated or generic content.
-
+- [Quality calibration](references/quality-calibration.md): compare observed defects and task-specific examples, not arbitrary aesthetic scores.

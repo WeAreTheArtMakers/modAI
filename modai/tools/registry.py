@@ -34,6 +34,7 @@ class ToolRegistry:
         self.evidence = evidence or SharedEvidenceCache()
         self.max_write_chars = max_write_chars
         self.load_skill = load_skill
+        self.verify = None
 
     def schemas(self, allowed_names: set[str] | None = None) -> list[dict[str, Any]]:
         """Return tool schemas filtered by policy.
@@ -60,9 +61,27 @@ class ToolRegistry:
                 'description': 'Activate domain instructions by skill name; optional reference is relative to that skill.',
                 'parameters': {'type': 'object', 'properties': {'name': {'type': 'string'},
                     'reference': {'type': 'string'}}, 'required': ['name']}}})
+        if self.verify and self.tools.policy.capabilities.test and (allowed_names is None or 'verify' in allowed_names):
+            schemas.append({'type': 'function', 'function': {'name': 'verify',
+                'description': 'Run project-configured tests and quality gates. No speculative commands or installations.',
+                'parameters': {'type': 'object', 'properties': {}}}})
         return schemas
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name == 'verify':
+            if not self.tools.policy.capabilities.test or not callable(self.verify):
+                raise PermissionError('verification capability unavailable')
+            report = self.verify()
+            # Full evidence remains in the session/events; only actionable facts
+            # enter model context, not four copies of screenshots/DOM metadata.
+            compact = {key: report.get(key) for key in ('verdict', 'sequence', 'changed_paths')}
+            compact['checks'] = [{'name': item['name'], 'verdict': item['verdict'],
+                                  'errors': item.get('errors', [])[:16]} for item in report.get('checks', [])]
+            if report.get('verdict') == 'FAIL':
+                compact['error'] = 'Repair these concrete failures; preserve existing working navigation targets.'
+            else:
+                compact['instruction'] = 'Checks passed. Do not run verify again unless files change; finish remaining objective or return final.'
+            return compact
         if name == 'load_skill' and self.load_skill:
             return self.load_skill(**arguments)
         # Accept persisted 4.x tool calls during session migration; new schemas

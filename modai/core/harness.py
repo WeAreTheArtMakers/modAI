@@ -14,9 +14,7 @@ from modai.core.contracts import infer_contract
 from modai.core.evidence import SharedEvidenceCache
 from modai.quality.project import ProjectVerifier, project_instructions, project_snapshot
 from modai.tools.coding import (
-    BOOTSTRAP_WRITE_TARGET_CHARS,
     MODEL_WRITE_MAX_CHARS,
-    RESCUE_EVIDENCE_MAX_CHARS,
     CodingTools,
 )
 from modai.tools.policy import Capabilities, ToolPolicy
@@ -26,6 +24,12 @@ from modai.skills import SkillRegistry, SkillRouter
 from .context import ContextManager
 from .events import EventBus, HarnessEvent
 from .session import SessionStore
+from .tool_phase import select_tools, successful_result
+from .skill_phase import SkillPhase
+from .bootstrap_phase import BootstrapPhase
+from .verification_phase import VerificationPhase
+from .model_phase import ModelPhase
+from modai.quality.test_plan import verification_hint as project_check_hint
 
 
 SYSTEM_PROMPT = """You are Code Virtuoso, the persistent coding agent in MODAI.
@@ -65,15 +69,7 @@ class HarnessResult:
     metrics: dict[str, Any]
 
 
-# v4.1: harness-internal paths stay out of model-facing discovery
-# (project snapshot, ls/find listings, PATH_NOT_FOUND guidance).
-_INTERNAL_PATHS = frozenset({
-    ".git", ".venv", "node_modules", "__pycache__", ".pytest_cache",
-    ".modai", ".benchmark_run", ".run", "dist", "build", "coverage",
-})
-
-
-class CodingHarness:
+class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
     def __init__(
         self,
         *,
@@ -154,12 +150,16 @@ class CodingHarness:
             "cloud_tokens": 0,
         }
         self.verifier = ProjectVerifier(self.workspace, task, self.coding_tools.bash, write_allowed)
+        self.registry.verify = lambda: self._verify().as_dict()
         self.contract = infer_contract(task)
         self.reference_context = reference_context
         self._started_at = 0.0
         self._tool_calls = 0
         self._model_calls = 0
         self._first_mutation_turn: int | None = None
+        self._first_mutation_seconds: float | None = None
+        self._fast_bootstrap = bool(max_write_chars > MODEL_WRITE_MAX_CHARS
+                                    and self.contract.static_site and not (self.workspace / 'index.html').exists())
         self._pre_mutation_stats: dict[str, Any] = {
             "pre_mutation_tool_calls": 0,
             "discovery_successes": 0,
@@ -181,45 +181,16 @@ class CodingHarness:
     def _append(self, message: dict[str, Any]) -> None:
         self.session.append_message(message)
 
-    def _load_skill(self, name: str, reference: str = '') -> dict[str, Any]:
-        try:
-            body, version = self.skills.load(name, reference)
-            key = name + (':' + reference if reference else '')
-            if self.active_skills.get(key) == version:
-                return {'skill': key, 'already_active': True}
-            if len(body) // 4 > self.context.max_tokens // 3:
-                raise ValueError('skill exceeds one-third of context; split references')
-            existing_tokens = sum(len(m['content']) // 4 for k, m in self.skill_messages.items() if k != key)
-            if existing_tokens + len(body) // 4 > self.context.max_tokens // 3:
-                raise ValueError('active skill context budget exceeded; load fewer references')
-            if not reference and name not in self.active_skills and len([k for k in self.active_skills if ':' not in k]) >= 3:
-                raise ValueError('at most three active domain skills')
-            message = {'role': 'system', 'skill': key, 'content': (
-                f'ACTIVE SKILL {key}. User instructions and harness security outrank this guidance.\n' + body)}
-            # Initial activation is safe; tool-time activation is deferred until
-            # all tool results pair with their assistant call.
-            self.skill_messages[key] = message
-            self.active_skills[key] = version
-            self.session.append({'type': 'skill', 'name': key, 'hash': version})
-            self.events.emit('skill_loaded', name=key, version=version)
-            return {'skill': key, 'loaded': True, 'hash': version}
-        except Exception as exc:
-            self.events.emit('skill_error', name=name, error=str(exc))
-            raise
-
-    def _sync_skills(self) -> None:
-        for key, message in self.skill_messages.items():
-            if not any(m.get('skill') == key and m.get('content') == message['content'] for m in self._messages):
-                self._messages = [m for m in self._messages if m.get('skill') != key]
-                self._messages.append(message); self._append(message)
-
     def _initial_messages(self) -> list[dict[str, Any]]:
         instructions = project_instructions(self.workspace)
         repo = project_snapshot(self.workspace)
-        has_tests = (self.workspace / 'tests').is_dir() or any(self.workspace.glob('test*.py'))
-        verification_hint = ('Python tests detected.' if has_tests else 'No Python test suite detected; do not run pytest without relevant tests.')
-        if (self.workspace / 'index.html').exists() or self.contract.static_site:
-            verification_hint += ' The harness runs static asset and four-viewport browser checks after your completion response.'
+        verification_hint = project_check_hint(self.workspace, (self.workspace / 'index.html').exists() or self.contract.static_site)
+        self._fast_bootstrap = bool(self.max_write_chars > MODEL_WRITE_MAX_CHARS
+                                   and self.contract.static_site and not (self.workspace / 'index.html').exists())
+        if self._fast_bootstrap:
+            verification_hint += ('\nFIRST ARTIFACT: produce a valid compact index.html (target 1800 characters) '
+                                  'with semantic content and responsive baseline first. Then refine it with edit '
+                                  'or additional CSS/JS files to satisfy the full objective. This is not a completion shortcut.')
         messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT.replace('4000', str(self.max_write_chars))}]
         if instructions:
             messages.append({"role": "system", "content": "Project instructions:\n" + instructions})
@@ -336,461 +307,7 @@ class CodingHarness:
             )
         )
 
-    def _verify(self) -> Any:
-        report = self.verifier.verify(sorted(self.coding_tools.mutated_paths))
-        if report.verdict == 'PASS' and self.visual_review_enabled and 'landing-page-design' in self.active_skills:
-            if self._visual_attempts < 2 and self._visual_result.get('verdict') != 'UNAVAILABLE':
-                from modai.quality.visual import review
-                self.events.emit('visual_review_started', attempt=self._visual_attempts + 1)
-                self._visual_result, response = review(self.runtime, self.workspace, self.task)
-                self._visual_attempts += 1
-                if response:
-                    self._model_calls += 1
-                    self._record_usage(response)
-                self.events.emit('visual_review_finished', **self._visual_result)
-            if self._visual_result.get('verdict') == 'FAIL':
-                from modai.quality.project import CheckResult
-                report.checks.append(CheckResult('visual_design', 'FAIL',
-                    [str(x) for x in self._visual_result.get('blocking_changes', [])] or ['Visual review failed; inspect screenshots'],
-                    self._visual_result))
-                report.verdict = 'FAIL'
-        self.session.append({"type": "verification", "report": report.as_dict()})
-        self.events.emit("verification_finished", **report.as_dict())
-        return report
-
-    @staticmethod
-    def _is_useful_discovery(name: str, ok: bool, result: Any) -> bool:
-        """v4.1: only successful discovery carrying real content consumes budget.
-
-        Failed reads (FileNotFoundError, empty results) are not evidence.
-        """
-        if not ok or name not in {"read", "grep", "find", "ls"}:
-            return False
-        if not isinstance(result, dict) or "error" in result or "error_code" in result:
-            return False
-        if name == "read":
-            return bool(str(result.get("content", "")).strip())
-        if name == "grep":
-            return bool(str(result.get("matches", "")).strip())
-        return bool(result.get("entries") or result.get("matches"))
-
-    def _top_level_paths(self, limit: int = 20) -> list[str]:
-        """Real top-level entries for PATH_NOT_FOUND guidance (internals hidden)."""
-        try:
-            entries = sorted(
-                entry.name + ("/" if entry.is_dir() else "")
-                for entry in self.workspace.iterdir()
-                if entry.name not in _INTERNAL_PATHS
-            )
-        except OSError:
-            return []
-        return entries[:limit]
-
-    def _rescue_evidence(self, limit: int = RESCUE_EVIDENCE_MAX_CHARS) -> str:
-        """Deterministic bounded evidence for the bootstrap-rescue context.
-
-        Clipped contents of successful read results already in the session;
-        falls back to the top-level tree. No summarization, no extra model call.
-        """
-        chunks: list[str] = []
-        used = 0
-        for msg in self._messages:
-            if msg.get("role") != "tool" or msg.get("name") != "read":
-                continue
-            body = str(msg.get("content", ""))
-            try:
-                payload = json.loads(body)
-                if isinstance(payload, dict) and payload.get("content"):
-                    body = str(payload["content"])
-            except (ValueError, TypeError):
-                pass
-            if not body.strip():
-                continue
-            chunks.append(body)
-            used += len(body)
-            if used >= limit:
-                break
-        text = "\n---\n".join(chunks)[:limit]
-        if text.strip():
-            return text
-        return "Top-level workspace paths:\n" + "\n".join(self._top_level_paths())
-
-    def _capped_write_schema(self, description: str) -> dict[str, Any] | None:
-        """Write-only schema copy advertising the real hard maximum.
-
-        Deep-copied per call; the global SCHEMAS table is never mutated.
-        """
-        base = next(
-            (s for s in self.registry.schemas(allowed_names={"write"})), None
-        )
-        if base is None:
-            return None
-        schema = json.loads(json.dumps(base))
-        try:
-            content_prop = schema["function"]["parameters"]["properties"]["content"]
-        except (KeyError, TypeError):
-            return None
-        content_prop["maxLength"] = MODEL_WRITE_MAX_CHARS
-        content_prop["description"] = description
-        return schema
-
-    def _bootstrap_rescue(self, turns: int) -> dict[str, Any] | None:
-        """Fresh micro-context bootstrap after length truncation, plus ONE
-        size-correction pass for a completed-but-oversized write.
-
-        Returns the executed write result when it reports changed=True, else
-        None (fail-fast; the caller ends the run). Success merges the
-        assistant tool call + tool result into the main session transcript.
-        Only CONTENT_TOO_LARGE triggers the correction, and only once:
-        transport errors, repair mode, and non-write calls never enter it.
-        """
-        schema = self._capped_write_schema(
-            "Create a small first artifact. Aim for roughly "
-            f"{BOOTSTRAP_WRITE_TARGET_CHARS} characters. Hard maximum: "
-            f"{MODEL_WRITE_MAX_CHARS} characters. Larger files must be "
-            "continued in later write/append/edit calls."
-        )
-        if schema is None:
-            self.events.emit("bootstrap_rescue", outcome="skipped",
-                             reason="write tool unavailable")
-            return None
-
-        def attempt(messages: list[dict[str, Any]], label: str) -> tuple[Any | None, Any | None, Any | None]:
-            """One generate + single-write execute + transcript merge.
-
-            Returns (response, call, result); result is None unless a single
-            write call executed. Merges nothing unless a write executed.
-            """
-            self._model_calls += 1
-            self._pre_mutation_stats["bootstrap_rescue_attempts"] += 1
-            self.events.emit("model_started", turn=turns, attempt=label)
-            try:
-                response = self.runtime.generate(
-                    messages, [schema],
-                    on_text=lambda text: self.events.emit("text_delta", text=text),
-                )
-            except Exception as exc:
-                self.events.emit("bootstrap_rescue", outcome="failed",
-                                 reason=f"{type(exc).__name__}: {exc}")
-                return None, None, None
-            self._record_usage(response)
-            calls = response.tool_calls or []
-            if len(calls) != 1 or calls[0].name != "write":
-                self.events.emit("bootstrap_rescue", outcome="failed",
-                                 reason="no single write call",
-                                 content_length=len(response.content),
-                                 truncated=response.truncated)
-                return response, None, None
-            call = calls[0]
-            self._tool_calls += 1
-            self.events.emit("tool_started", name=call.name, arguments=call.arguments,
-                             rescue=True)
-            try:
-                result = self.registry.execute(call.name, call.arguments)
-            except Exception as exc:
-                result = {"error": f"{type(exc).__name__}: {exc}"}
-            assistant = self._assistant_message(response)
-            self._messages.append(assistant)
-            self._append(assistant)
-            tool_message = {
-                "role": "tool", "tool_call_id": call.id, "name": call.name,
-                "content": self.registry.model_result(result),
-            }
-            self._messages.append(tool_message)
-            self._append(tool_message)
-            self.events.emit("tool_finished", name=call.name,
-                             ok="error" not in result, result=result, rescue=True)
-            return response, call, result
-
-        rescue_messages = [
-            {"role": "system", "content": (
-                "You are MODAI Code Virtuoso. Execute exactly one bounded "
-                "bootstrap mutation. Use the provided write tool. Do not "
-                "complete the whole task in this turn."
-            )},
-            {"role": "user", "content": "OBJECTIVE\n" + self.task},
-            {"role": "user", "content": (
-                "KNOWN PRODUCT FACTS (clipped evidence, authoritative for names only):\n"
-                + self._rescue_evidence()
-            )},
-            {"role": "user", "content": (
-                "CURRENT SUBTASK\n"
-                "Create only the first small artifact.\n"
-                "Aim for roughly 2500 characters.\n"
-                "Hard maximum: 4000 characters.\n"
-                "Do not complete the full application in this turn.\n"
-                "Use later write/append/edit calls for additional content.\n"
-                "For a web page:\n"
-                "- create index.html\n"
-                "- valid HTML scaffold only\n"
-                "- link styles.css\n"
-                "- no inline CSS\n"
-                "- do not complete styling\n"
-                "- call write exactly once"
-            )},
-        ]
-        self.events.emit("bootstrap_rescue", outcome="attempted", turn=turns)
-        _, _, result = attempt(rescue_messages, "rescue")
-        if isinstance(result, dict) and result.get("changed"):
-            self.events.emit("bootstrap_rescue", outcome="succeeded",
-                             path=result.get("path"))
-            return result
-        # v4.1.5: exactly ONE size-correction pass for a completed write that
-        # overshot the hard limit. The rejected content is NOT fed back —
-        # only its size — so the retry cannot re-derive the same overshoot.
-        if not (isinstance(result, dict)
-                and result.get("error_code") == "CONTENT_TOO_LARGE"
-                and self._pre_mutation_stats["bootstrap_size_corrections"] == 0):
-            self.events.emit("bootstrap_rescue", outcome="failed",
-                             reason="write reported no change")
-            return None
-        actual = int(result.get("actual_chars", 0) or 0)
-        self._pre_mutation_stats["bootstrap_size_corrections"] = 1
-        self._pre_mutation_stats["bootstrap_oversize_chars"] = actual
-        self.events.emit("bootstrap_size_correction", outcome="attempted",
-                         actual_chars=actual, hard_max=MODEL_WRITE_MAX_CHARS, turn=turns)
-        correction_messages = [
-            {"role": "system", "content": (
-                "You are MODAI Code Virtuoso. Execute exactly one bounded "
-                "bootstrap mutation. Use the provided write tool."
-            )},
-            {"role": "user", "content": "OBJECTIVE\n" + self.task},
-            {"role": "user", "content": (
-                "BOOTSTRAP SIZE CORRECTION\n\n"
-                f"Your previous write call was {actual} characters.\n"
-                f"The hard maximum is {MODEL_WRITE_MAX_CHARS} characters.\n\n"
-                "Create the same FIRST ARTIFACT again, but only as a minimal "
-                "valid scaffold.\n\n"
-                "Requirements:\n"
-                "- aim for 2000 characters or less\n"
-                f"- hard maximum {MODEL_WRITE_MAX_CHARS}\n"
-                "- omit optional sections, detailed copy, comments, decoration "
-                "and secondary content\n"
-                "- preserve only the minimum structure needed to continue the task\n"
-                "- do not complete the application\n"
-                "- call write exactly once"
-            )},
-        ]
-        _, _, corrected = attempt(correction_messages, "size-correction")
-        if isinstance(corrected, dict) and corrected.get("changed"):
-            self.events.emit("bootstrap_size_correction", outcome="succeeded",
-                             path=corrected.get("path"))
-            self.events.emit("bootstrap_rescue", outcome="succeeded",
-                             path=corrected.get("path"), via="size-correction")
-            return corrected
-        self.events.emit("bootstrap_size_correction", outcome="failed")
-        self.events.emit("bootstrap_rescue", outcome="failed",
-                         reason="size correction produced no change")
-        return None
-
-    def _verification_message(self, report: Any, *, proactive: bool = False) -> dict[str, Any]:
-        if report.verdict == "PASS":
-            content = (
-                "CHECKPOINT: current repository passes deterministic quality gates. "
-                "Continue implementing any remaining parts of the objective, or return a final summary if done."
-            )
-        else:
-            exact = (
-                "\n".join(f"- {item}" for item in report.errors[:30])
-                or "- required evidence is missing"
-            )
-            label = "CHECKPOINT" if proactive else "VALIDATION"
-            content = (
-                f"{label} FAILED.\n{exact}\n"
-                "Repair only these exact current failures. "
-                "Do not reread unchanged files unless a targeted line is required."
-            )
-        return {"role": "user", "content": content}
-
     # ── v4: Repair context helpers ────────────────────────────────────────────
-
-    @staticmethod
-    def _is_structural_failure(report: Any) -> bool:
-        """Return True when repair requires creating missing files (needs write).
-
-        Targeted failures (CSS overflow, lint error on existing file) need only edit.
-        Structural failures (missing artifact file) need write as well.
-        """
-        for check in report.checks:
-            if check.verdict != "PASS":
-                for err in check.errors:
-                    low = err.lower()
-                    if (
-                        "required file is missing" in low
-                        or "missing or empty" in low
-                        or "not found" in low
-                        or "missing asset" in low
-                        or "missing script" in low
-                    ):
-                        return True
-        return False
-
-    def _resolve_css_selector(self, selector: str) -> dict[str, Any] | None:
-        """Given a DOM selector like 'table.tools-table', find likely CSS source location.
-
-        Search priority:
-          1. Exact full selector in .css files
-          2. Class name in .css files
-          3. ID in .css files
-          4. <style> blocks in .html files
-
-        HTML body class attributes are NOT treated as CSS source.
-        Returns a snippet of the declaration block if found.
-        """
-        # Extract class names and ID from selector
-        class_names = re.findall(r"\.([\w-]+)", selector)
-        id_match = re.search(r"#([\w-]+)", selector)
-        tag_match = re.match(r"^([a-z][\w-]*)", selector)
-
-        candidates: list[tuple[int, str, int, int, str]] = []
-        # priority bucket: 0=exact-full-selector, 1=class-in-css, 2=id-in-css, 3=style-block
-
-        css_files = sorted(self.workspace.glob("**/*.css"))
-        html_files = sorted(self.workspace.glob("**/*.html"))
-
-        def _extract_block(file_lines: list[str], rule_line: int) -> str:
-            """Extract the CSS declaration block starting at rule_line (1-based)."""
-            result: list[str] = []
-            in_block = False
-            depth = 0
-            for i, line in enumerate(file_lines[max(0, rule_line - 1):rule_line + 40], rule_line):
-                result.append(f"  {i}: {line}")
-                if "{" in line:
-                    depth += line.count("{")
-                    in_block = True
-                if "}" in line:
-                    depth -= line.count("}")
-                    if in_block and depth <= 0:
-                        break
-            return "\n".join(result)
-
-        for source_file in css_files:
-            try:
-                text = source_file.read_text(encoding="utf-8", errors="replace")
-                file_lines = text.splitlines()
-            except OSError:
-                continue
-            rel = str(source_file.relative_to(self.workspace))
-
-            # 1. Exact full selector (e.g. "table.tools-table" or ".tools-table")
-            for test_sel in ([selector] + [f".{c}" for c in class_names]):
-                pattern = re.compile(
-                    re.escape(test_sel) + r"\s*[{,]",
-                    re.MULTILINE,
-                )
-                for m in pattern.finditer(text):
-                    line_no = text[: m.start()].count("\n") + 1
-                    snippet = _extract_block(file_lines, line_no)
-                    priority = 0 if test_sel == selector else 1
-                    candidates.append((priority, rel, line_no, line_no + 15, snippet))
-
-            # 2. ID search
-            if id_match:
-                pattern = re.compile(
-                    r"#" + re.escape(id_match.group(1)) + r"\s*[{,]",
-                    re.MULTILINE,
-                )
-                for m in pattern.finditer(text):
-                    line_no = text[: m.start()].count("\n") + 1
-                    snippet = _extract_block(file_lines, line_no)
-                    candidates.append((2, rel, line_no, line_no + 15, snippet))
-
-        # 3. <style> blocks in HTML (lowest priority)
-        for source_file in html_files:
-            try:
-                text = source_file.read_text(encoding="utf-8", errors="replace")
-                file_lines = text.splitlines()
-            except OSError:
-                continue
-            rel = str(source_file.relative_to(self.workspace))
-
-            # Only search inside <style>...</style>
-            for style_m in re.finditer(r"<style[^>]*>(.*?)</style>", text, re.S | re.I):
-                style_content = style_m.group(1)
-                style_start_line = text[: style_m.start(1)].count("\n")
-                for cls in class_names:
-                    pattern = re.compile(r"\." + re.escape(cls) + r"\s*[{,]", re.MULTILINE)
-                    for m in pattern.finditer(style_content):
-                        line_no = style_start_line + style_content[: m.start()].count("\n") + 1
-                        snippet = _extract_block(file_lines, line_no)
-                        candidates.append((3, rel, line_no, line_no + 15, snippet))
-
-        if not candidates:
-            return None
-
-        candidates.sort(key=lambda c: (c[0], c[2]))  # priority first, then line number
-        _, best_file, best_start, best_end, best_snippet = candidates[0]
-        return {
-            "file": best_file,
-            "start_line": best_start,
-            "end_line": best_end,
-            "snippet": best_snippet,
-        }
-
-    def _build_repair_context(self, report: Any) -> str:
-        """Build a structured JSON repair context for the model.
-
-        Enriches browser_quality failures with CSS source location so the model
-        can make a single targeted edit instead of re-reading the whole codebase.
-        """
-        ctx: dict[str, Any] = {
-            "mode": "REPAIR",
-            "failures": [],
-        }
-
-        for check in report.checks:
-            if check.verdict == "PASS":
-                continue
-
-            failure: dict[str, Any] = {"validator": check.name, "errors": []}
-
-            if check.name == "browser_quality":
-                for err in check.errors[:5]:
-                    entry: dict[str, Any] = {"message": err}
-
-                    # Try to extract overflow diagnostic
-                    sel_m = re.search(r"likely offender:\s*([^\s(]+)", err)
-                    meas_m = re.search(
-                        r"element width\s+(\d+)px.*?overflow\s+(\d+)px", err
-                    )
-                    vp_m = re.search(r"(\d+)>(\d+)", err)
-
-                    if sel_m:
-                        raw_selector = sel_m.group(1)
-                        entry["selector"] = raw_selector
-                        resolution = self._resolve_css_selector(raw_selector)
-                        if resolution:
-                            entry["source"] = {
-                                "file": resolution["file"],
-                                "start_line": resolution["start_line"],
-                                "end_line": resolution["end_line"],
-                            }
-                            entry["current_code"] = resolution["snippet"]
-                        if meas_m:
-                            entry["measurements"] = {
-                                "element_width_px": int(meas_m.group(1)),
-                                "overflow_px": int(meas_m.group(2)),
-                            }
-                            if vp_m:
-                                entry["measurements"]["viewport_width_px"] = int(vp_m.group(2))
-                        entry["recommended_actions"] = [
-                            f"add 'max-width: 100%' and 'overflow-x: auto' to "
-                            f"'{raw_selector}' or wrap it in an overflow-x:auto container"
-                        ]
-
-                    failure["errors"].append(entry)
-
-            else:
-                failure["errors"] = [{"message": e} for e in check.errors[:10]]
-
-            ctx["failures"].append(failure)
-
-        repair_json = json.dumps(ctx, indent=2, ensure_ascii=False)
-        return (
-            repair_json
-            + "\n\nMake the smallest targeted edit that fixes the listed failures.\n"
-            "Do not redesign unrelated code. Do not inspect unrelated files."
-        )
 
     # ── Timeout helper ────────────────────────────────────────────────────────
 
@@ -918,6 +435,7 @@ class CodingHarness:
             steering_items = self.session.take_steering()
             if steering_items:
                 report = None
+                self._verification_cache = None
                 repair_count = 0
                 stalled = 0
                 _repair_mode = False
@@ -944,32 +462,13 @@ class CodingHarness:
                         turns,
                     )
 
-            # ── Active schema selection ────────────────────────────────────────
-            # v4.1.3 bootstrap: before the first mutation, implementation
-            # exposes ONLY write. There is nothing reliable to edit yet, and
-            # the first required action is a bounded file creation.
-            _BOOTSTRAP_ONLY: set[str] = {"write"}
-            # Targeted repair: read+grep+edit (no write, no bash)
-            _repair_targeted: set[str] = {"read", "grep", "edit"}
-            # Structural repair: read+grep+edit+write (missing files)
-            _repair_struct: set[str] = {"read", "grep", "edit", "write"}
-
-            if _repair_mode:
-                _allowed: set[str] | None = (
-                    _repair_struct if _repair_structural else _repair_targeted
-                )
-            elif _force_implementation and not self.coding_tools.mutated_paths:
-                _allowed = _BOOTSTRAP_ONLY
-            else:
-                _allowed = None  # full policy-filtered schema
-
-            if _bash_disabled:
-                if _allowed is not None:
-                    _allowed = _allowed - {"bash"}
-                else:
-                    all_names = {s["function"]["name"] for s in self.registry.schemas()}
-                    _allowed = all_names - {"bash"}
-
+            # Pure phase decision: bootstrap, coding, or targeted repair.
+            _allowed = select_tools(repair=_repair_mode, structural=_repair_structural,
+                                    force_write=_force_implementation,
+                                    mutated=bool(self.coding_tools.mutated_paths),
+                                    bash_disabled=_bash_disabled,
+                                    available={s['function']['name'] for s in self.registry.schemas()},
+                                    fast_bootstrap=self._fast_bootstrap)
             _active_schemas = self.registry.schemas(allowed_names=_allowed)
             skill_tokens = sum(len(m['content']) // 4 for m in self.skill_messages.values())
             from .context import estimated_tokens
@@ -980,65 +479,10 @@ class CodingHarness:
                              tools=tool_tokens, chat=max(0, chat_tokens - skill_tokens))
 
             # ── Model call ────────────────────────────────────────────────────
-            retry = 0
-            while True:
-                self._model_calls += 1
-                self.events.emit("model_started", turn=turns, attempt=retry + 1)
-                try:
-                    gen_kw: dict[str, Any] = {
-                        "on_text": lambda text: self.events.emit("text_delta", text=text),
-                    }
-                    if self._reduced_context_retry and self._runtime_reduced_ctx:
-                        gen_kw["_reduced_context"] = True
-                    response = self.runtime.generate(
-                        self._messages,
-                        _active_schemas,
-                        **gen_kw,
-                    )
-                    self._reduced_context_retry = False
-                    break
-                except Exception as exc:
-                    detail = f"{type(exc).__name__}: {exc}"
-                    self.events.emit(
-                        "model_failed", error=detail, transient=self._transient_model_error(exc)
-                    )
-                    if self.coding_tools.mutated_paths:
-                        report = self._verify()
-                    if not self._transient_model_error(exc) or retry >= self.model_retries:
-                        return self._timeout_result(
-                            exc, report, turns, completion_candidate=completion_candidate
-                        )
-                    retry += 1
-                    before_compact = len(self._messages)
-                    self.compact()
-                    after_compact = len(self._messages)
-                    recovery: dict[str, Any] = {
-                        "role": "user",
-                        "content": (
-                            f"LOCAL MODEL REQUEST RECOVERY {retry}/{self.model_retries}. "
-                            "The prior request ended before a complete response and no tool call "
-                            "from it was executed. Continue from the saved repository. "
-                            "Use one small complete tool call; do not repeat completed reads."
-                        ),
-                    }
-                    if report is not None and report.verdict != "PASS":
-                        recovery["content"] += "\n" + self._verification_message(report).get(
-                            "content", ""
-                        )
-                    self._messages.append(recovery)
-                    self._append(recovery)
-                    self.events.emit(
-                        "model_retry",
-                        attempt=retry,
-                        maximum=self.model_retries,
-                        error=detail,
-                        delay=self.retry_backoff_seconds * retry,
-                        context_before=before_compact,
-                        context_after=after_compact,
-                    )
-                    self._reduced_context_retry = True
-                    if self.retry_backoff_seconds:
-                        time.sleep(self.retry_backoff_seconds * retry)
+            response, report, early_result = self._request_model(
+                _active_schemas, turns, report, completion_candidate)
+            if early_result is not None:
+                return early_result
 
             self._record_usage(response)
 
@@ -1065,6 +509,7 @@ class CodingHarness:
                         _force_implementation = False
                         if self._first_mutation_turn is None:
                             self._first_mutation_turn = turns
+                            self._first_mutation_seconds = round(time.monotonic() - self._started_at, 3)
                         _path_not_found_streak = 0
                         continue
                     return self._result(
@@ -1141,10 +586,14 @@ class CodingHarness:
                     self.events.emit("tool_started", name=call.name, arguments=call.arguments)
                     try:
                         result = self.registry.execute(call.name, call.arguments)
-                        ok = not (isinstance(result, dict) and (result.get('error') or result.get('exit_code', 0) != 0))
+                        ok = successful_result(result)
                     except Exception as exc:
                         result = {"error": f"{type(exc).__name__}: {exc}"}
                         ok = False
+                        if call.name == 'edit' and isinstance(exc, ValueError):
+                            result['instruction'] = ('No edits were applied. Use one exact replacement first. '
+                                                     'Never combine overlapping old-text ranges; inspect a targeted range '
+                                                     'if the expected text is missing or ambiguous.')
 
                         # v4.1 missing-path guard: never retryable; answer with
                         # the real top-level tree so the model cannot invent
@@ -1242,6 +691,7 @@ class CodingHarness:
                             and str(result.get('path', '')) in self.coding_tools.mutated_paths):
                         if self._first_mutation_turn is None:
                             self._first_mutation_turn = turns
+                            self._first_mutation_seconds = round(time.monotonic() - self._started_at, 3)
                         _batch_has_mutation = True
                         _path_not_found_streak = 0
                         # v4.1.1: first mutation lifts the hard pre-mutation
@@ -1383,6 +833,7 @@ class CodingHarness:
             if report.verdict == "PASS":
                 follow_up = self.session.take_follow_up()
                 if follow_up:
+                    self._verification_cache = None
                     report = None
                     repair_count = 0
                     stalled = 0
@@ -1438,6 +889,9 @@ class CodingHarness:
             "duplicate_reads": self._duplicate_reads,
             "visual_review": self._visual_result,
             "first_mutation_turn": self._first_mutation_turn,
+            "first_artifact_seconds": self._first_mutation_seconds,
+            "model": self.runtime.model,
+            "fast_bootstrap": self._fast_bootstrap,
             "verification_attempts": int(verification.get("sequence", 0) or 0),
             # v4.1.1 pre-mutation telemetry (observation only).
             **getattr(self, "_pre_mutation_stats", {}),

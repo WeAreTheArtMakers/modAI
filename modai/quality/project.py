@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
 from modai.core.contracts import infer_contract
+from .test_plan import discover_commands
 
 
 @dataclass(slots=True)
@@ -85,18 +85,7 @@ class ProjectVerifier:
         self.sequence = 0
 
     def _command_checks(self) -> list[CheckResult]:
-        commands: list[tuple[str, list[str]]] = []
-        package = self.workspace / "package.json"
-        if package.is_file():
-            try:
-                scripts = json.loads(package.read_text(encoding="utf-8")).get("scripts", {})
-            except (json.JSONDecodeError, OSError):
-                scripts = {}
-            for name in ("test", "lint", "build"):
-                if name in scripts:
-                    commands.append((f"npm {name}", ["npm", "run", name]))
-        if any(self.workspace.glob("test*.py")) or (self.workspace / "tests").is_dir():
-            commands.append(("pytest", [sys.executable, "-m", "pytest", "-q"]))
+        commands = discover_commands(self.workspace)
         results: list[CheckResult] = []
         for name, command in commands[:4]:
             try:

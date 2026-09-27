@@ -1,5 +1,10 @@
 # MODAI 5.1 harness audit — 2026-09-27
 
+See [5.2 release evidence](RELEASE_5_2.md) for the subsequent phase extraction, test-plan,
+verification tool, stricter navigation/contrast tests, local benchmark observations and
+explicit remaining limitations. The measurements below are the preserved 5.1 baseline,
+not a claim about the current stricter gate set.
+
 ## Reproduced failures and changes
 
 The recorded run `20260927-195728-764622` emitted a completed 6,634-character HTML write twice. Its 4,000-character model-tool boundary rejected both attempts. The harness unconditionally set `ok=True` for returned dictionaries, so the terminal showed successful writes while the workspace remained unchanged. Production writes now accept up to 16,000 characters, and error dictionaries/non-zero exit codes are unsuccessful. The 4K compatibility mode and atomic-write protections remain tested.

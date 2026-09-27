@@ -204,7 +204,36 @@ Profiles mainly affect the legacy orchestra. The 5.x harness deliberately avoids
 
 ## Quality gates
 
-### 5.1 reliability and domain skills
+### 5.2 focused phases, direct verification and visual calibration
+
+The persistent coder now has separately tested model recovery, bootstrap, tool-selection,
+skill and verification phases. Empty static projects get a smaller initial tool surface
+and a compact first-artifact target; existing repositories retain normal editing access.
+First-artifact latency is recorded by model rather than hidden behind an agent count.
+
+Project checks are derived directly from actual files: Python tests, Node package scripts
+and package-manager lockfiles, Go modules and Rust manifests. A JS `tests/` directory
+does not trigger pytest. The `verify` tool runs those checks directly and returns compact
+repair evidence. Static-browser gates exercise anchor clicks and hidden navigation;
+production landing tasks also check measurable solid-background text contrast.
+
+```bash
+# Real local coding benchmark (isolated temporary workspace)
+.venv/bin/python tests/benchmark_local.py --model studiobrn/modHacker:latest --no-visual-review
+# Deterministic visual examples + broken negative control, no model/network
+.venv/bin/python scripts/benchmark_visual.py
+# Inspect your own rendered page; report + four screenshots
+.venv/bin/python scripts/benchmark_visual.py --workspace /path/to/site
+# Compare installed local models, sequentially (no extra model memory pressure)
+.venv/bin/python scripts/benchmark_models.py --model MODEL_A --model MODEL_B --repeat 3
+```
+
+Calibration distinguishes objective issues from subjective design. Gradients, images,
+transparent text and unsupported color spaces may be unmeasured; a clean heuristic result
+is not a full WCAG or premium-design certification. See [reviewed skill sources](docs/SKILL_SOURCES.md)
+and [phase architecture](docs/HARNESS_ARCHITECTURE.md).
+
+### Reliability and domain skills
 
 The Code Virtuoso now loads up to two domain skills for obvious tasks without a planning request. A landing page uses `landing-page-design` and `frontend-engineering` in the same SOLO session. Nine curated skills cover frontend, Python, debugging, web research, Web3, finance, accessibility and security. See [Skills guide](docs/SKILLS.md).
 

@@ -1,4 +1,4 @@
-# MODAI 5.0 Harness Architecture
+# MODAI 5.2 Harness Architecture
 
 MODAI 5.0 uses a persistent coding harness as the default execution engine. It keeps the proven Python CLI, Ollama local runtime, bilingual interface, legacy runs, and deterministic web gates while removing planning/debate overhead from ordinary software work.
 
@@ -34,6 +34,35 @@ Native tool calls are primary. If a server explicitly rejects tool/function sche
 A response stopped for length with tool calls is unsafe: the complete batch is rejected and the model is asked for one smaller complete call.
 
 ## Persistent loop
+
+The coordinator preserves one authoritative session and shared policy. Phase helpers
+contain no independent agent, model or writer state:
+
+| Module | Boundary |
+| --- | --- |
+| `model_phase.py` | Transport retry, compact recovery and checkpoint verification |
+| `tool_phase.py` | Pure bootstrap/repair schema selection and truthful tool outcomes |
+| `bootstrap_phase.py` | Bounded first-write rescue and missing-path evidence |
+| `verification_phase.py` | Current gates, repair context, CSS locations and content-hash reuse |
+| `skill_phase.py` | Skill trust, activation and deferred instruction synchronization |
+| `quality/test_plan.py` | One project-derived command plan shared by prompt and verifier |
+
+The coordinator still owns turn/control transitions. The extraction is deliberately
+behavior-preserving; it is not a second orchestration layer or a rewrite of atomic tools.
+Pure decisions and integration acceptance scenarios are covered in `test_phase_refactor.py`.
+
+Production empty static projects start with a compact tool surface and a small first
+artifact target. This is a soft generation target, not a new local-token budget or an
+unsafe partial write. Subsequent coding gets the full permitted tools. Existing-project
+repairs keep edit access. Model-specific latency is recorded as `first_artifact_seconds`,
+`model` and `fast_bootstrap`; compare multiple repeated runs rather than promising a
+universal model ranking.
+
+`verify` returns compact actionable check results to the model. Full gate evidence
+remains in session/events. An unchanged static PASS can be reused for at most 30 seconds
+under a bounded full-content hash; any content change invalidates it. Configured command
+tests, oversized trees and symbolic links disable reuse. Intermediate PASS never ends
+an unfinished coding session by itself.
 
 One Code Virtuoso owns the write-capable session:
 
