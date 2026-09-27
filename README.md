@@ -204,6 +204,37 @@ Profiles mainly affect the legacy orchestra. The 5.x harness deliberately avoids
 
 ## Quality gates
 
+### 5.1 reliability and domain skills
+
+The Code Virtuoso now loads up to two domain skills for obvious tasks without a planning request. A landing page uses `landing-page-design` and `frontend-engineering` in the same SOLO session. Nine curated skills cover frontend, Python, debugging, web research, Web3, finance, accessibility and security. See [Skills guide](docs/SKILLS.md).
+
+```bash
+modai doctor
+modai --model studiobrn/modHacker:latest doctor
+modai --skills
+modai --skill repo-debugging "Fix the current failing test"
+modai --trust-project-skills "Build this project"
+```
+
+`doctor` performs real streaming and native tool smoke tests; it does not merely check installed packages. It distinguishes runtime failures from harness failures and prints the actual Python environment. Explicit top-level `think=False` is preserved. Local templates that require a single initial system message receive normalized project/skill instructions.
+
+The production CLI accepts a complete model write up to 16,000 characters. The low-level registry retains a configurable 4,000-character compatibility mode for staged workflows. An error or non-zero command exit is never displayed as successful execution. Actual changed files, tool paths/commands, failure details and visible generation progress are shown in the terminal; `d` toggles details without printing into the spinner line.
+
+Timeout retries preserve the session and files. Empty visible responses get one reduced-context retry, and bounded truncated-write recovery remains available. Technical PASS never replaces the user's requested implementation. Resume preserves cumulative token counts and verification sequence. Cloud delegates cannot read local files or test logs.
+
+Update an existing checkout without recreating your selected model:
+
+```bash
+git pull --ff-only
+.venv/bin/python -m pip install -r requirements.txt
+modai --version
+modai doctor
+```
+
+The installed command points at `run.sh`, which selects its own virtual environment. A full `./setup.sh` is needed for a fresh installation; routine source updates do not require downloading/rebuilding the model.
+
+Current measured local performance and known limitations are recorded in [Harness audit](docs/HARNESS_AUDIT.md). These are measured examples, not speed or design-quality guarantees.
+
 MODAI extracts an artifact contract from explicit filenames in the prompt. A task naming `index.html`, `styles.css`, and `app.js` cannot complete while one is missing or empty.
 
 For static sites it also runs:

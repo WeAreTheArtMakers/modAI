@@ -31,5 +31,7 @@
   "compaction_reserve_tokens": 2048,
   "model_timeout_seconds": 720,
   "model_retries": 2,
-  "model_max_output_tokens": 4096
+  "model_max_output_tokens": 4096,
+  "max_auto_skills": 2,
+  "trust_project_skills": false
 }

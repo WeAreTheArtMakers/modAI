@@ -51,8 +51,12 @@ class Settings:
     model_timeout_seconds: float = 720.0
     model_retries: int = 2
     model_max_output_tokens: int = 4096
+    max_auto_skills: int = 2
+    trust_project_skills: bool = False
 
     def validate(self) -> None:
+        if not 0 <= self.max_auto_skills <= 3:
+            raise ValueError('max_auto_skills must be 0–3')
         if not self.model.strip():
             raise ValueError("model boş olamaz")
         if not self.host.startswith(("http://", "https://")):

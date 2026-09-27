@@ -21,6 +21,7 @@ from modai.tools.coding import (
 )
 from modai.tools.policy import Capabilities, ToolPolicy
 from modai.tools.registry import ToolRegistry
+from modai.skills import SkillRegistry, SkillRouter
 
 from .context import ContextManager
 from .events import EventBus, HarnessEvent
@@ -39,6 +40,8 @@ TOOL RULES:
 - bash NEVER writes files. bash/sh are NOT allowed as argv[0] — use write/edit for all file creation.
 
 WORKFLOW:
+Preserve unrelated user work. Inspect only relevant files. Never invent tool results or claim a change without tool evidence.
+User instructions and harness security outrank active domain skills. Reuse unchanged evidence and repair current concrete failures.
 1. Read the task. If product/project context determines content (e.g. a landing page about this project),
    inspect the smallest relevant sources first (README, package.json, etc.) — 1-2 targeted reads only.
    If the user supplied complete specs, start implementation directly.
@@ -89,6 +92,11 @@ class CodingHarness:
         delegate_runtime: ModelRuntime | None = None,
         network_enabled: bool = False,
         reference_context: str = "",
+        max_write_chars: int = MODEL_WRITE_MAX_CHARS,
+        forced_skills: list[str] | None = None,
+        max_auto_skills: int = 2,
+        trust_project_skills: bool = False,
+        visual_review_enabled: bool = False,
         event: Callable[[HarnessEvent], None] | None = None,
     ) -> None:
         self.runtime = runtime
@@ -120,7 +128,19 @@ class CodingHarness:
             if delegate_enabled
             else None
         )
-        self.registry = ToolRegistry(self.coding_tools, delegate=delegate, evidence=evidence)
+        self.registry = ToolRegistry(self.coding_tools, delegate=delegate, evidence=evidence,
+                                     max_write_chars=max_write_chars)
+        self.max_write_chars = max_write_chars
+        self.skills = SkillRegistry(self.workspace, trust_project=trust_project_skills)
+        self.active_skills: dict[str, str] = {}
+        self.skill_messages: dict[str, dict[str, Any]] = {}
+        self.forced_skills = forced_skills or []
+        self.max_auto_skills = max_auto_skills
+        self.registry.load_skill = self._load_skill
+        self._duplicate_reads = 0
+        self.visual_review_enabled = visual_review_enabled
+        self._visual_attempts = 0
+        self._visual_result: dict[str, Any] = {'verdict': 'NOT_RUN'}
         self.context = ContextManager(context_size, compaction_reserve_tokens)
         self.repair_rounds = repair_rounds
         self.max_turns = max_turns
@@ -161,10 +181,46 @@ class CodingHarness:
     def _append(self, message: dict[str, Any]) -> None:
         self.session.append_message(message)
 
+    def _load_skill(self, name: str, reference: str = '') -> dict[str, Any]:
+        try:
+            body, version = self.skills.load(name, reference)
+            key = name + (':' + reference if reference else '')
+            if self.active_skills.get(key) == version:
+                return {'skill': key, 'already_active': True}
+            if len(body) // 4 > self.context.max_tokens // 3:
+                raise ValueError('skill exceeds one-third of context; split references')
+            existing_tokens = sum(len(m['content']) // 4 for k, m in self.skill_messages.items() if k != key)
+            if existing_tokens + len(body) // 4 > self.context.max_tokens // 3:
+                raise ValueError('active skill context budget exceeded; load fewer references')
+            if not reference and name not in self.active_skills and len([k for k in self.active_skills if ':' not in k]) >= 3:
+                raise ValueError('at most three active domain skills')
+            message = {'role': 'system', 'skill': key, 'content': (
+                f'ACTIVE SKILL {key}. User instructions and harness security outrank this guidance.\n' + body)}
+            # Initial activation is safe; tool-time activation is deferred until
+            # all tool results pair with their assistant call.
+            self.skill_messages[key] = message
+            self.active_skills[key] = version
+            self.session.append({'type': 'skill', 'name': key, 'hash': version})
+            self.events.emit('skill_loaded', name=key, version=version)
+            return {'skill': key, 'loaded': True, 'hash': version}
+        except Exception as exc:
+            self.events.emit('skill_error', name=name, error=str(exc))
+            raise
+
+    def _sync_skills(self) -> None:
+        for key, message in self.skill_messages.items():
+            if not any(m.get('skill') == key and m.get('content') == message['content'] for m in self._messages):
+                self._messages = [m for m in self._messages if m.get('skill') != key]
+                self._messages.append(message); self._append(message)
+
     def _initial_messages(self) -> list[dict[str, Any]]:
         instructions = project_instructions(self.workspace)
         repo = project_snapshot(self.workspace)
-        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+        has_tests = (self.workspace / 'tests').is_dir() or any(self.workspace.glob('test*.py'))
+        verification_hint = ('Python tests detected.' if has_tests else 'No Python test suite detected; do not run pytest without relevant tests.')
+        if (self.workspace / 'index.html').exists() or self.contract.static_site:
+            verification_hint += ' The harness runs static asset and four-viewport browser checks after your completion response.'
+        messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT.replace('4000', str(self.max_write_chars))}]
         if instructions:
             messages.append({"role": "system", "content": "Project instructions:\n" + instructions})
         if self.reference_context:
@@ -182,7 +238,8 @@ class CodingHarness:
                 "role": "user",
                 "content": (
                     f"OBJECTIVE\n{self.task}\n\nCURRENT PROJECT TREE\n{repo}\n\n"
-                    "Implement the objective. When you believe the work is done, "
+                    + verification_hint + '\n'
+                    + "Implement the objective. When you believe the work is done, "
                     "return a concise summary without calling any more tools."
                 ),
             }
@@ -260,6 +317,7 @@ class CodingHarness:
             {"type": "compaction", "messages": compacted, "original_count": len(current)}
         )
         self._messages = compacted
+        self._sync_skills()
         self.events.emit("context_compacted", before=len(current), after=len(compacted))
 
     @staticmethod
@@ -280,6 +338,22 @@ class CodingHarness:
 
     def _verify(self) -> Any:
         report = self.verifier.verify(sorted(self.coding_tools.mutated_paths))
+        if report.verdict == 'PASS' and self.visual_review_enabled and 'landing-page-design' in self.active_skills:
+            if self._visual_attempts < 2 and self._visual_result.get('verdict') != 'UNAVAILABLE':
+                from modai.quality.visual import review
+                self.events.emit('visual_review_started', attempt=self._visual_attempts + 1)
+                self._visual_result, response = review(self.runtime, self.workspace, self.task)
+                self._visual_attempts += 1
+                if response:
+                    self._model_calls += 1
+                    self._record_usage(response)
+                self.events.emit('visual_review_finished', **self._visual_result)
+            if self._visual_result.get('verdict') == 'FAIL':
+                from modai.quality.project import CheckResult
+                report.checks.append(CheckResult('visual_design', 'FAIL',
+                    [str(x) for x in self._visual_result.get('blocking_changes', [])] or ['Visual review failed; inspect screenshots'],
+                    self._visual_result))
+                report.verdict = 'FAIL'
         self.session.append({"type": "verification", "report": report.as_dict()})
         self.events.emit("verification_finished", **report.as_dict())
         return report
@@ -747,8 +821,35 @@ class CodingHarness:
     def run(self, *, resume: bool = False) -> HarnessResult:  # noqa: C901
         self._started_at = time.monotonic()
         self._messages = self.session.messages() if resume else []
+        if resume:
+            # New policy applies to an old checkpoint. Do not keep obsolete
+            # size instructions or project skills whose trust was revoked.
+            self._messages = [m for m in self._messages if not m.get('skill')
+                              or str(m['skill']).split(':', 1)[0] in self.skills.skills]
+            for message in self._messages:
+                if message.get('role') == 'system' and 'persistent coding agent in MODAI' in str(message.get('content', '')):
+                    message['content'] = SYSTEM_PROMPT.replace('4000', str(self.max_write_chars))
+                    break
+            self.session.append({'type': 'compaction', 'messages': self._messages,
+                                 'reason': 'resume policy and skill trust refresh'})
         if not self._messages:
             self._messages = self._initial_messages()
+        else:
+            for message in self._messages:
+                if message.get('skill'):
+                    self.skill_messages[message['skill']] = message
+            for record in self.session.records():
+                if record.get('type') == 'skill' and str(record['name']).split(':', 1)[0] in self.skills.skills:
+                    self.active_skills[record['name']] = record['hash']
+        self.events.emit('skill_discovered', **self.skills.report())
+        catalog = {'role': 'system', 'content': self.skills.catalog()}
+        if not any(m.get('content') == catalog['content'] for m in self._messages):
+            self._messages.append(catalog); self._append(catalog)
+        selected = list(dict.fromkeys(self.forced_skills + SkillRouter().select(self.task, self.skills, self.max_auto_skills)))
+        for name in selected[:3]:
+            self.events.emit('skill_selected', name=name)
+            self._load_skill(name)
+        self._sync_skills()
         self.events.emit(
             "harness_started",
             task=self.task,
@@ -810,6 +911,7 @@ class CodingHarness:
             self._append(message)
 
         for turns in range(1, self.max_turns + 1):
+            self._sync_skills()
             if self.session.aborted:
                 return self._result("aborted", "Task aborted by the user.", report, turns)
 
@@ -869,6 +971,13 @@ class CodingHarness:
                     _allowed = all_names - {"bash"}
 
             _active_schemas = self.registry.schemas(allowed_names=_allowed)
+            skill_tokens = sum(len(m['content']) // 4 for m in self.skill_messages.values())
+            from .context import estimated_tokens
+            chat_tokens = estimated_tokens(self._messages)
+            tool_tokens = len(json.dumps(_active_schemas)) // 4
+            self.events.emit('context_usage', total=chat_tokens + tool_tokens,
+                             limit=self.context.max_tokens, skills=skill_tokens,
+                             tools=tool_tokens, chat=max(0, chat_tokens - skill_tokens))
 
             # ── Model call ────────────────────────────────────────────────────
             retry = 0
@@ -978,8 +1087,9 @@ class CodingHarness:
                     output_tokens=response.usage.output_tokens,
                     input_tokens=response.usage.input_tokens,
                 )
-                if empty_response_retries <= 3:
+                if empty_response_retries <= 1:
                     self._reduced_context_retry = True
+                    self.compact()
                     nudge = {
                         "role": "user",
                         "content": (
@@ -1031,7 +1141,7 @@ class CodingHarness:
                     self.events.emit("tool_started", name=call.name, arguments=call.arguments)
                     try:
                         result = self.registry.execute(call.name, call.arguments)
-                        ok = True
+                        ok = not (isinstance(result, dict) and (result.get('error') or result.get('exit_code', 0) != 0))
                     except Exception as exc:
                         result = {"error": f"{type(exc).__name__}: {exc}"}
                         ok = False
@@ -1110,6 +1220,8 @@ class CodingHarness:
                             ),
                             str(delegate_usage.get("provider", "delegate")),
                         )
+                    if isinstance(result, dict) and result.get('cached'):
+                        self._duplicate_reads += 1
 
                     model_content = self.registry.model_result(
                         result, limit=max(256, batch_output_remaining)
@@ -1126,7 +1238,8 @@ class CodingHarness:
                     self._messages.append(tool_message)
                     self._append(tool_message)
                     self.events.emit("tool_finished", name=call.name, ok=ok, result=result)
-                    if ok and isinstance(result, dict) and result.get("changed"):
+                    if (ok and isinstance(result, dict) and result.get("changed")
+                            and str(result.get('path', '')) in self.coding_tools.mutated_paths):
                         if self._first_mutation_turn is None:
                             self._first_mutation_turn = turns
                         _batch_has_mutation = True
@@ -1321,6 +1434,9 @@ class CodingHarness:
             "wall_seconds": round(time.monotonic() - self._started_at, 3),
             "model_calls": self._model_calls,
             "tool_calls": self._tool_calls,
+            "active_skills": sorted(self.active_skills),
+            "duplicate_reads": self._duplicate_reads,
+            "visual_review": self._visual_result,
             "first_mutation_turn": self._first_mutation_turn,
             "verification_attempts": int(verification.get("sequence", 0) or 0),
             # v4.1.1 pre-mutation telemetry (observation only).

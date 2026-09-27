@@ -66,6 +66,12 @@ class OllamaRuntime:
     def generate(self, messages, tools, *, on_text=None,
                  max_output_tokens: int | None = None,
                  _reduced_context: bool = False) -> ModelResponse:
+        # Some local templates (including Gemma-derived models) only accept
+        # one system message at the beginning. Keep policy/project/skill
+        # instructions semantically intact and normalize their placement.
+        system = '\n\n'.join(str(m.get('content', '')) for m in messages if m.get('role') == 'system')
+        messages = ([{'role': 'system', 'content': system}] if system else []) + [
+            {k: v for k, v in m.items() if k != 'skill'} for m in messages if m.get('role') != 'system']
         options = dict(self.options)
         if max_output_tokens is not None:
             options["num_predict"] = max(1, int(max_output_tokens))
@@ -100,7 +106,7 @@ class OllamaRuntime:
                 raise
             self.supports_native_tools = False
             fallback = list(messages)
-            fallback.append({"role": "system", "content": (
+            fallback.append({"role": "user", "content": (
                 "Native tools are unavailable. For one tool call only, return strict JSON "
                 '{"tool":"name","args":{...}}. Available schemas: ' + json.dumps(tools, ensure_ascii=False)
             )})

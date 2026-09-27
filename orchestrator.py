@@ -208,12 +208,20 @@ class TerminalUI:
             self._event_unlocked(kind, message)
 
     def _event_unlocked(self, kind: str, message: str) -> None:
+        if kind == 'task_reset':
+            self._stop_activity()
+            self._details.clear()
+            self._progress = ''
+            return
         if kind == 'activity_progress':
             self._progress = message
             return
         if kind == 'detail':
             self._details.append(message)
             if self.expanded:
+                # Never print into the middle of the spinner's active line.
+                if self._activity_stop is not None:
+                    return
                 print('    ' + message, flush=True)
             return
         if kind == "tool":
@@ -1156,8 +1164,10 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         data = event.data
         material_change = False
         if event.kind == "harness_started":
+            self.event('task_reset', '')
             self.event("ok", self.t("Kalıcı Kod Virtüözü oturumu başladı", "Persistent Code Virtuoso session started"))
         elif event.kind == "model_started":
+            self._harness_visible_chars = 0
             self.event("activity_start", self.t(
                 f"Kod Virtüözü çalışıyor · tur {data.get('turn')}",
                 f"Code Virtuoso is working · turn {data.get('turn')}",
@@ -1170,7 +1180,9 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         elif event.kind == "model_failed":
             self.event("warn", self.t("Yerel model isteği tamamlanamadı", "Local model request did not complete"))
         elif event.kind == "tool_started":
-            self.event("tool", f"Code Virtuoso: {data.get('name')}")
+            args = data.get('arguments', {})
+            target = args.get('path') or ' '.join(str(x) for x in args.get('argv', [])[:8])
+            self.event("tool", f"Kod Virtüözü: {data.get('name')} · {str(target)[:120]}")
         elif event.kind == "tool_finished":
             result = data.get("result", {})
             changed = bool(isinstance(result, dict) and result.get("changed"))
@@ -1186,7 +1198,18 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
                     f"FILES {len(changed_paths)} · {path} changed",
                 ))
             else:
-                self.event("detail", f"{'✓' if data.get('ok') else '×'} {data.get('name')}{suffix}")
+                error = result.get('error') if isinstance(result, dict) else ''
+                if error:
+                    self.event('error', f"{data.get('name')}: {str(error)[:220]}")
+                elif isinstance(result, dict) and result.get('exit_code', 0) != 0:
+                    self.event('warn', f"{data.get('name')} exit {result['exit_code']}: {str(result.get('output', ''))[-220:]}")
+                else:
+                    self.event("detail", f"{'✓' if data.get('ok') else '×'} {data.get('name')}{suffix}")
+        elif event.kind == 'text_delta':
+            self._harness_visible_chars = getattr(self, '_harness_visible_chars', 0) + len(data.get('text', ''))
+            self.event('activity_progress', self.t(
+                f"yanıt üretiliyor · {self._harness_visible_chars:,} karakter",
+                f"generating response · {self._harness_visible_chars:,} characters"))
         elif event.kind == "usage":
             cloud_used = int(data.get("cloud_tokens", 0) or 0)
             cloud_budget = int(state.get("cloud_token_budget", self.settings.cloud_token_budget) or 0)
@@ -1209,6 +1232,25 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             checks = " · ".join(f"{item['name']} {item['verdict']}" for item in data.get("checks", []))
             self.event("ok" if verdict == "PASS" else "warn", f"GATES {checks}")
             state["verification"] = data
+            errors = [e for check in data.get('checks', []) for e in check.get('errors', [])]
+            if errors:
+                self.event('warn', ' · '.join(str(e) for e in errors[:3])[:400])
+        elif event.kind == 'skill_loaded':
+            self.event('score', f"SKILL {data.get('name')}")
+            state['active_skills'] = sorted(set(state.get('active_skills', [])) | {str(data.get('name'))})
+            self._last_active_skills = list(state['active_skills'])
+        elif event.kind == 'skill_discovered':
+            for diagnostic in data.get('diagnostics', []):
+                self.event('warn', 'SKILL ' + diagnostic['detail'])
+        elif event.kind == 'skill_error':
+            self.event('error', f"SKILL {data.get('name')}: {data.get('error')}")
+        elif event.kind == 'context_usage':
+            self.event('detail', f"CTX {data['total']:,}/{data['limit']:,} · SKILLS {data['skills']:,} · TOOLS {data['tools']:,} · CHAT {data['chat']:,}")
+        elif event.kind == 'visual_review_started':
+            self.event('activity_start', self.t('Yerel görsel kalite incelemesi', 'Local visual quality review'))
+        elif event.kind == 'visual_review_finished':
+            self.event('ok' if data.get('verdict') == 'PASS' else 'warn',
+                       f"VISUAL {data.get('verdict')} · {data.get('score', data.get('reason', ''))}")
         elif event.kind == "no_progress":
             self.event("warn", self.t("İlerleme koruması somut dosya değişikliği istedi",
                                       "No-progress guard requested a concrete file change"))
@@ -1230,7 +1272,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             "task": task, "workspace": str(get_workspace()), "model": self.settings.model,
             "mode": route.mode, "route_reason": route.reason, "write_allowed": write_allowed,
             "write_permission_source": permission_source,
-            "cloud_allowed": bool(allow_cloud and self.settings.cloud_enabled),
+            "cloud_allowed": bool(allow_cloud and self.settings.cloud_enabled and not contains_obvious_secret(task)),
             "cloud_token_budget": self.settings.cloud_token_budget,
             "created_at": datetime.now().isoformat(timespec="seconds"), "updated_at": "",
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
@@ -1286,6 +1328,11 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             repair_rounds=self.settings.repair_rounds,
             max_turns=self.settings.harness_max_turns,
             model_retries=self.settings.model_retries,
+            max_write_chars=16000,
+            max_auto_skills=self.settings.max_auto_skills,
+            trust_project_skills=self.settings.trust_project_skills,
+            visual_review_enabled=self.settings.visual_review,
+            forced_skills=getattr(self, 'forced_skills', []),
             delegate_enabled=state.get("mode") == "orchestra",
             delegate_runtime=delegate_runtime,
             network_enabled=self.settings.internet_enabled,
@@ -1293,6 +1340,9 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             event=lambda item: self._harness_event(run_dir, state, item),
         )
         harness.coding_tools.mutated_paths.update(state.get("changed_paths", []))
+        if resume:
+            harness.usage.update({k: int(state.get('usage', {}).get(k, 0)) for k in harness.usage})
+            harness.verifier.sequence = int(state.get('verification', {}).get('sequence', 0))
         self._active_harness = harness
         try:
             result = harness.run(resume=resume)
@@ -1312,6 +1362,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
                 "Task paused at the cloud budget boundary; session and files were preserved. Add tokens and resume.",
             )
         state.update({"status": result.status,
+                      "version": VERSION,
                       "phase": "complete" if result.status == "completed" else "cloud_budget" if paused_for_cloud else "needs_attention",
                       "usage": result.usage, "changed_paths": result.changed_paths,
                       "verification": result.verification, "final": result.final,
@@ -2455,6 +2506,9 @@ varsa söylenebilir. Salt-okunur görevde değişiklik önerisini tamamlanmayan 
 
 
 HELP_TR = """Komutlar:
+  /doctor                  Yerel model, araç ve ortam sağlık testi
+  /skills [active|doctor]   Alan becerileri ve tanıları
+  /skill:AD [GÖREV]         Beceriyi seç ve isteğe bağlı görev çalıştır
   /help                    Yardım
   /menu                    Ok tuşlu ana sayfaya dön
   /agents                  Uzman ajan kataloğu
@@ -2481,6 +2535,9 @@ HELP_TR = """Komutlar:
 """
 
 HELP_EN = """Commands:
+  /doctor                  Real local model and environment health checks
+  /skills [active|doctor]   Domain skills and diagnostics
+  /skill:NAME [TASK]        Select a skill and optionally execute a task
   /help                    Help
   /menu                    Return to the arrow-key home screen
   /agents                  Specialist agent catalog
@@ -2724,6 +2781,27 @@ def command_shell(orchestrator: Orchestrator, ui: TerminalUI, return_to_menu: bo
             return "menu" if return_to_menu else "exit"
         if command == "/help":
             print(help_text(orchestrator.settings.language))
+        elif command == '/doctor':
+            from modai.doctor import diagnose, render
+            print(render(diagnose(orchestrator.settings)))
+        elif command == '/skills':
+            from modai.skills import SkillRegistry
+            registry = SkillRegistry(get_workspace(), trust_project=orchestrator.settings.trust_project_skills)
+            if value.strip() == 'active':
+                print(json.dumps(getattr(orchestrator, '_last_active_skills', getattr(orchestrator, 'forced_skills', []))))
+            else:
+                print(json.dumps(registry.report(), indent=2, ensure_ascii=False))
+        elif command.startswith('/skill:') or command == '/skill':
+            from modai.skills import SkillRegistry
+            name = command.split(':', 1)[1] if ':' in command else value.strip()
+            try:
+                SkillRegistry(get_workspace(), trust_project=orchestrator.settings.trust_project_skills).load(name)
+                orchestrator.forced_skills = list(dict.fromkeys(getattr(orchestrator, 'forced_skills', []) + [name]))[-3:]
+                ui.event('score', f'SKILL {name}')
+                if ':' in command and value.strip():
+                    ui.final(orchestrator.run_task(value.strip()))
+            except ValueError as exc:
+                ui.event('error', str(exc))
         elif command == "/clear":
             print("\033[2J\033[H", end="")
         elif command == "/status":
@@ -3019,6 +3097,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="MODAI persistent local coding and agent harness")
     parser.add_argument("task", nargs="*", help="Görev; verilmezse ok tuşlu ana sayfa açılır")
     parser.add_argument("--model", help="Bu çalıştırmada kullanılacak yerel Ollama modeli")
+    parser.add_argument('--doctor', action='store_true', help='Real local model and environment diagnostics')
+    parser.add_argument('--skills', action='store_true', help='List available domain skills and diagnostics')
+    parser.add_argument('--skill', action='append', default=[], help='Force a domain skill (repeatable, maximum 3)')
+    parser.add_argument('--trust-project-skills', action='store_true', help='Trust .modai/skills in this selected workspace')
     parser.add_argument("--workspace", help="Ajanların çalışacağı klasör")
     parser.add_argument("--resume", nargs="?", const="", metavar="RUN_ID", help="Duraklatılmış göreve devam et")
     parser.add_argument("--list-models", action="store_true")
@@ -3079,12 +3161,29 @@ def main(argv: list[str] | None = None) -> int:
             settings.harness_mode = args.mode
         if args.no_visual_review:
             settings.visual_review = False
+        if args.trust_project_skills:
+            settings.trust_project_skills = True
+        for name in ('model_timeout_seconds', 'model_retries', 'model_max_output_tokens', 'context_size'):
+            value = getattr(args, name)
+            if value is not None:
+                setattr(settings, name, value)
+        settings.validate()
+        if args.doctor or args.task == ['doctor']:
+            from modai.doctor import diagnose, render
+            report = diagnose(settings)
+            print(render(report))
+            return 0 if report['verdict'] == 'PASS' else 1
+        if args.skills:
+            from modai.skills import SkillRegistry
+            print(json.dumps(SkillRegistry(Path(settings.workspace), trust_project=settings.trust_project_skills).report(), indent=2))
+            return 0
         settings.validate()
         ui = TerminalUI(not args.no_color, settings.language)
         ui.expanded = args.verbose
         orchestrator = Orchestrator(
             settings, event=ui.event, cloud_budget_handler=ui.request_cloud_budget,
         )
+        orchestrator.forced_skills = args.skill[:3]
         if args.profile:
             orchestrator.apply_profile(args.profile)
         for name in (

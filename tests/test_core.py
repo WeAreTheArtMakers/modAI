@@ -808,7 +808,8 @@ class ResumeTests(unittest.TestCase):
         self.assertEqual([task["role"] for task in state["plan"]["tasks"]], ["coder"])
         self.assertEqual(state["task_cursor"], 0)
         self.assertEqual(state['phase'], 'execute')
-        self.assertEqual(state["version"], "5.0.0")
+        from modai import __version__
+        self.assertEqual(state["version"], __version__)
         self.assertEqual(len(state['migration_history']), 1)
 
     def test_resume_allows_legacy_local_run_above_old_token_budget(self) -> None:

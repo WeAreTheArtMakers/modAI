@@ -26,10 +26,14 @@ SCHEMAS = [
 
 class ToolRegistry:
     def __init__(self, tools: CodingTools, delegate: Any | None = None,
-                 evidence: SharedEvidenceCache | None = None) -> None:
+                 evidence: SharedEvidenceCache | None = None,
+                 max_write_chars: int = MODEL_WRITE_MAX_CHARS,
+                 load_skill: Any | None = None) -> None:
         self.tools = tools
         self.delegate = delegate
         self.evidence = evidence or SharedEvidenceCache()
+        self.max_write_chars = max_write_chars
+        self.load_skill = load_skill
 
     def schemas(self, allowed_names: set[str] | None = None) -> list[dict[str, Any]]:
         """Return tool schemas filtered by policy.
@@ -38,13 +42,29 @@ class ToolRegistry:
         harness to temporarily restrict the tool surface (exploration budget,
         repair-mode restriction, bash circuit-breaker).
         """
-        return [
+        import copy
+        schemas = copy.deepcopy([
             schema for schema in SCHEMAS
             if self.tools.policy.allows(schema["function"]["name"])
             and (allowed_names is None or schema["function"]["name"] in allowed_names)
-        ]
+        ])
+        for schema in schemas:
+            fn = schema['function']
+            if fn['name'] in {'write', 'append'}:
+                fn['description'] = fn['description'].replace('4000', str(self.max_write_chars))
+                prop = fn['parameters']['properties']['content']
+                prop['maxLength'] = self.max_write_chars
+                prop['description'] = prop['description'].replace('4000', str(self.max_write_chars))
+        if self.load_skill and (allowed_names is None or 'load_skill' in allowed_names):
+            schemas.append({'type': 'function', 'function': {'name': 'load_skill',
+                'description': 'Activate domain instructions by skill name; optional reference is relative to that skill.',
+                'parameters': {'type': 'object', 'properties': {'name': {'type': 'string'},
+                    'reference': {'type': 'string'}}, 'required': ['name']}}})
+        return schemas
 
     def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name == 'load_skill' and self.load_skill:
+            return self.load_skill(**arguments)
         # Accept persisted 4.x tool calls during session migration; new schemas
         # advertise only the compact 5.x names.
         if name == "write_file":
@@ -71,21 +91,21 @@ class ToolRegistry:
         # internal Python callers and fixtures.
         if name in {"write", "append"}:
             content = arguments.get("content", "")
-            if isinstance(content, str) and len(content) > MODEL_WRITE_MAX_CHARS:
+            if isinstance(content, str) and len(content) > self.max_write_chars:
                 return {
                     "error": (
                         "CONTENT_TOO_LARGE: model write chunk exceeds "
-                        f"{MODEL_WRITE_MAX_CHARS} characters "
+                        f"{self.max_write_chars} characters "
                         f"(actual {len(content)})."
                     ),
                     "error_code": "CONTENT_TOO_LARGE",
                     "retryable": False,
                     "path": str(arguments.get("path", "?")),
-                    "max_chars": MODEL_WRITE_MAX_CHARS,
+                    "max_chars": self.max_write_chars,
                     "actual_chars": len(content),
                     "instruction": (
                         "CONTENT_TOO_LARGE. Maximum model write chunk: "
-                        f"{MODEL_WRITE_MAX_CHARS} characters. Create a smaller "
+                        f"{self.max_write_chars} characters. Create a smaller "
                         "valid scaffold or continuation chunk. Use append for "
                         "additional end-of-file content. Use edit for precise "
                         "replacements."
@@ -100,7 +120,9 @@ class ToolRegistry:
         if cache_key:
             cached = self.evidence.get(cache_key)
             if cached is not None:
-                return {**cached, "cached": True}
+                return {'cached': True, 'path': cached.get('path'),
+                        'summary': 'Unchanged evidence already read in this session. Reuse previous result.',
+                        'content': str(cached.get('content', ''))[:200]}
         if name == "delegate":
             if not callable(self.delegate):
                 raise RuntimeError("delegate runtime is unavailable")

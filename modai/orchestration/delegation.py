@@ -24,6 +24,12 @@ class ReadOnlyDelegate:
         self.max_turns = max_turns
 
     def run(self, task: str, focus: str = "") -> dict[str, Any]:
+        # A cloud delegate receives only the explicitly consented public task,
+        # not filesystem contents, test logs or private project instructions.
+        if self.runtime.provider not in {'local', 'fake'}:
+            from providers import contains_obvious_secret
+            if contains_obvious_secret(task + '\n' + focus):
+                raise PermissionError('Cloud delegation rejected: task contains a secret')
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": (
                 "You are a bounded read-only delegate. Gather only the evidence requested. "
@@ -35,7 +41,12 @@ class ReadOnlyDelegate:
         input_tokens = 0
         output_tokens = 0
         for _turn in range(self.max_turns):
-            response = self.runtime.generate(messages, self.registry.schemas())
+            schemas = self.registry.schemas()
+            if self.runtime.provider not in {'local', 'fake'}:
+                schemas = [s for s in schemas if s['function']['name'] in {'web_search', 'fetch_url'}]
+            response = self.runtime.generate(messages, schemas)
+            if response.truncated or (not response.content.strip() and not response.tool_calls):
+                raise RuntimeError('Delegate produced no complete visible response; no evidence memo accepted')
             input_tokens += response.usage.input_tokens
             output_tokens += response.usage.output_tokens
             assistant: dict[str, Any] = {"role": "assistant", "content": response.content}
@@ -49,6 +60,8 @@ class ReadOnlyDelegate:
                                    "output_tokens": output_tokens}}
             for call in response.tool_calls:
                 try:
+                    if call.name not in {s['function']['name'] for s in schemas}:
+                        raise PermissionError('Delegate called a tool outside granted schemas')
                     result = self.registry.execute(call.name, call.arguments)
                 except Exception as exc:
                     result = {"error": f"{type(exc).__name__}: {exc}"}

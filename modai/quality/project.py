@@ -118,6 +118,8 @@ class ProjectVerifier:
         checks = [CheckResult("artifact_contract", "FAIL" if missing else "PASS",
                               [f"required file is missing or empty: {path}" for path in missing],
                               contract.as_dict())] if contract.files else []
+        if self.write_allowed and requires_artifact_change(self.task) and not changed_paths:
+            checks.append(CheckResult('artifact_change', 'FAIL', ['No requested artifact was changed; existing files alone do not prove task completion']))
         checks.extend(self._command_checks())
         if is_static_site_task(self.task, self.workspace):
             from runtime_context import set_workspace
