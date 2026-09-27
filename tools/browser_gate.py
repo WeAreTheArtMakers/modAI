@@ -42,7 +42,9 @@ def _probe_navigation_toggle(page: Any) -> list[str]:
             return []
         except Exception:
             return ['navigation menu toggle does not reveal hidden links']
-    return []
+    visible_targets = {link.get_attribute('href') for link in page.locator('a[href]').all()[:100] if link.is_visible()}
+    inaccessible = [link.get_attribute('href') for link in hidden if link.get_attribute('href') not in visible_targets]
+    return ['hidden navigation has no reachable alternative: ' + ', '.join(str(x) for x in inaccessible[:8])] if inaccessible else []
 
 
 def validate_browser_quality(path: str = ".") -> str:
@@ -149,6 +151,14 @@ def validate_browser_quality(path: str = ".") -> str:
                     screenshot = output / f"{name}.png"
                     page.screenshot(path=str(screenshot), full_page=True)
                     errors.extend(_probe_navigation_toggle(page))
+                    # Existence of #targets alone does not prove JS navigation works.
+                    for anchor in page.locator('a[href^="#"]').all()[:30]:
+                        if anchor.is_visible():
+                            try:
+                                anchor.click(timeout=1500)
+                            except Exception as exc:
+                                errors.append(f"navigation click failed: {anchor.get_attribute('href')} ({type(exc).__name__})")
+                    page.wait_for_timeout(50)
                     errors.extend(f"console: {item}" for item in console_errors)
                     errors.extend(f"javascript: {item}" for item in runtime_errors)
                     reports.append({
