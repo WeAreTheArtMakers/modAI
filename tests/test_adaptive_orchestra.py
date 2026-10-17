@@ -311,3 +311,19 @@ def test_orchestrator_explicit_mode_uses_staged_pipeline_and_auto_stays_solo(tmp
             state = json.loads((run_path / 'state.json').read_text())
         assert state['mode'] == 'solo'
         assert not (run_path / 'tasks.sqlite3').exists()
+
+
+@pytest.mark.parametrize('language,expected', [
+    ('tr', '--workspace dizini bulunamadı'),
+    ('en', '--workspace directory does not exist'),
+])
+def test_cli_rejects_missing_explicit_workspace_without_creating_it(tmp_path: Path,
+                                                                      capsys, language: str, expected: str):
+    from orchestrator import main
+
+    missing = tmp_path / 'not-a-project'
+    assert main(['--language', language, '--workspace', str(missing), 'Build a page']) == 1
+    captured = capsys.readouterr()
+    assert expected in captured.err
+    assert 'Traceback' not in captured.err
+    assert not missing.exists()

@@ -162,6 +162,8 @@ modai --max-tool-rounds 12 "TASK"       # legacy compatibility setting
 modai --max-hours 24 "TASK"             # legacy engine active-time guard
 ```
 
+Run these commands **inside your real project directory**, or add `--workspace "$PWD"` there. Paths such as `/path/to/project` in examples are placeholders, not directories MODAI creates for you. An explicit `--workspace` must already exist; an invalid path produces a short error without a Python traceback.
+
 Adaptive Orchestra defaults to `balanced`: context stays at 8192 unless measured memory headroom supports the requested 16384. `fast` caps at 8192. `extended` may allow up to 32768 only with at least 24 GB total memory and measured headroom; it will **not** activate a larger context on an M1 Pro 16 GB. These are conservative context targets, not measured KV-cache allocations. When telemetry is unavailable MODAI stays at 8192; when measured free memory falls below 5%, it pauses before the next model call and keeps durable session state. The TUI orchestration profile also exposes these two new settings.
 
 In staged mode, discovered project test/build scripts are **not** run by default; that is a truthful failed verification gate, not a skipped PASS. Review scripts in a trusted workspace before enabling `--trust-project-commands` or `MODAI_TRUST_PROJECT_COMMANDS=true`. This permission flag is not OS isolation: use a separate account/container for untrusted code. SOLO/AUTO keep their pre-5.3 project-command behavior for compatibility.

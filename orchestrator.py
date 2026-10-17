@@ -3240,7 +3240,17 @@ def main(argv: list[str] | None = None) -> int:
         if args.model:
             settings.model = args.model
         if args.workspace:
-            settings.workspace = args.workspace
+            requested_workspace = Path(args.workspace).expanduser()
+            if not requested_workspace.is_dir():
+                message = (
+                    f"--workspace dizini bulunamadı: {requested_workspace}. "
+                    "Önce var olan proje klasörüne geçin; bulunduğunuz klasörü kullanmak için --workspace seçeneğini kaldırın."
+                    if (args.language or settings.language) != "en" else
+                    f"--workspace directory does not exist: {requested_workspace}. "
+                    "Select an existing project directory, or omit --workspace to use the current directory."
+                )
+                raise ValueError(message)
+            settings.workspace = str(requested_workspace.resolve())
         if args.language:
             settings.language = args.language
         if args.no_internet:
@@ -3331,7 +3341,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             command_shell(orchestrator, ui)
         return 0
-    except (RuntimeError, ValueError, TimeoutError, json.JSONDecodeError) as exc:
+    except (OSError, RuntimeError, ValueError, TimeoutError, json.JSONDecodeError) as exc:
         print(f"HATA: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
