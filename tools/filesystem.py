@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 
 from runtime_context import get_workspace
+from runtime_context import is_model_action, privacy_profile
+from modai.security import sensitive_path
 
 
 IGNORED_DIRS = {".git", ".venv", "node_modules", "dist", "build", "__pycache__", ".next", ".cache"}
@@ -14,6 +16,8 @@ def _safe(path: str) -> Path:
     target = (workspace / path).resolve()
     if target != workspace and workspace not in target.parents:
         raise ValueError("Path escapes workspace")
+    if is_model_action() and sensitive_path(target, workspace, privacy_profile()):
+        raise PermissionError("model-facing access to a sensitive path is denied")
     return target
 
 
@@ -26,9 +30,12 @@ def list_files(path: str = ".", max_files: int = 500) -> str:
         return str(base.relative_to(workspace))
     files: list[str] = []
     for root, dirs, names in os.walk(base, followlinks=False):
-        dirs[:] = sorted(item for item in dirs if item not in IGNORED_DIRS and not item.startswith(".git"))
+        dirs[:] = sorted(item for item in dirs if item not in IGNORED_DIRS and not item.startswith(".git")
+                         and not (is_model_action() and sensitive_path(Path(root) / item, workspace, privacy_profile())))
         for name in sorted(names):
             candidate = Path(root) / name
+            if is_model_action() and sensitive_path(candidate, workspace, privacy_profile()):
+                continue
             try:
                 relative = candidate.relative_to(workspace)
             except ValueError:
@@ -94,8 +101,10 @@ def search_files(query: str, path: str = ".", max_results: int = 100) -> str:
     else:
         candidates: list[Path] = []
         for root, dirs, names in os.walk(base, followlinks=False):
-            dirs[:] = [item for item in dirs if item not in IGNORED_DIRS]
-            candidates.extend(Path(root) / name for name in names)
+            dirs[:] = [item for item in dirs if item not in IGNORED_DIRS
+                       and not (is_model_action() and sensitive_path(Path(root) / item, workspace, privacy_profile()))]
+            candidates.extend(Path(root) / name for name in names
+                              if not (is_model_action() and sensitive_path(Path(root) / name, workspace, privacy_profile())))
     for candidate in candidates:
         try:
             if candidate.stat().st_size > 2_000_000:

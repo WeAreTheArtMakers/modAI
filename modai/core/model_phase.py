@@ -2,6 +2,7 @@
 from __future__ import annotations
 import time
 from typing import Any
+from modai.security import redact
 
 
 class ModelPhase:
@@ -25,7 +26,7 @@ class ModelPhase:
                 self._reduced_context_retry = False
                 return response, report, None
             except Exception as exc:
-                detail = f"{type(exc).__name__}: {exc}"
+                detail = redact(f"{type(exc).__name__}: {exc}")
                 self.events.emit(
                     "model_failed", error=detail, transient=self._transient_model_error(exc)
                 )

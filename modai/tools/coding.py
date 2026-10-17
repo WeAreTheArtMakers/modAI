@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .policy import ToolPolicy
+from modai.security import redact, sensitive_path
 
 
 # v4.1.3: canonical model-facing write-chunk size. Model-generated write/append
@@ -28,12 +29,13 @@ RESCUE_EVIDENCE_MAX_CHARS = 2500
 
 class CodingTools:
     def __init__(self, workspace: Path, policy: ToolPolicy, log_dir: Path,
-                 max_output_chars: int = 12000) -> None:
+                 max_output_chars: int = 12000, privacy_profile: str = "guarded") -> None:
         self.workspace = workspace.resolve()
         self.policy = policy
         self.log_dir = log_dir
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.max_output_chars = max_output_chars
+        self.privacy_profile = privacy_profile
         self.mutated_paths: set[str] = set()
 
     def _path(self, value: str = ".", *, must_exist: bool = False) -> Path:
@@ -42,6 +44,8 @@ class CodingTools:
             candidate.relative_to(self.workspace)
         except ValueError as exc:
             raise PermissionError("path escapes the working directory") from exc
+        if sensitive_path(candidate, self.workspace, self.privacy_profile):
+            raise PermissionError("model-facing access to a sensitive path is denied")
         if must_exist and not candidate.exists():
             raise FileNotFoundError(value)
         return candidate
@@ -82,6 +86,8 @@ class CodingTools:
             if len(item.parts) - base_parts > max(1, min(int(depth), 6)):
                 continue
             # v4.1: harness-internal paths stay out of model-facing discovery.
+            if sensitive_path(item, self.workspace, self.privacy_profile):
+                continue
             if any(part in {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache",
                             ".modai", ".benchmark_run", ".run",
                             "dist", "build", "coverage"} for part in item.parts):
@@ -97,7 +103,8 @@ class CodingTools:
         ignored = {".git", "node_modules", ".venv", "__pycache__", ".pytest_cache",
                    ".modai", ".benchmark_run", ".run", "dist", "build", "coverage"}
         matches = [self._relative(item) for item in sorted(target.rglob(pattern))
-                   if not ignored.intersection(item.parts)][:limit]
+                   if not ignored.intersection(item.parts)
+                   and not sensitive_path(item, self.workspace, self.privacy_profile)][:limit]
         return {"pattern": pattern, "matches": matches, "truncated": len(matches) >= limit}
 
     def grep(self, pattern: str, path: str = ".", glob: str | None = None,
@@ -106,12 +113,18 @@ class CodingTools:
         argv = ["rg", "--line-number", "--no-heading", "--color", "never", "--max-count", str(limit)]
         if glob:
             argv.extend(["--glob", glob])
+        if self.privacy_profile != "legacy":
+            for exclusion in ("!.env", "!.env.*", "!*.env", "!*.pem", "!*.key", "!*.p12", "!*.pfx", "!*.p8", "!*.kdbx",
+                              "!.npmrc", "!.pypirc", "!.netrc", "!id_rsa", "!id_ed25519",
+                              "!credentials.json", "!service-account.json", "!.ssh/**",
+                              "!.aws/**", "!.gnupg/**", "!.codex/**", "!.modai/**", "!.run/**"):
+                argv.extend(["--glob", exclusion])
         argv.extend([pattern, str(target)])
         process = subprocess.run(argv, cwd=self.workspace, text=True, capture_output=True, timeout=30)
         output = process.stdout
         if process.returncode not in {0, 1}:
             raise RuntimeError(process.stderr.strip() or "rg failed")
-        return {"pattern": pattern, "matches": output[:self.max_output_chars],
+        return {"pattern": pattern, "matches": redact(output[:self.max_output_chars]),
                 "truncated": len(output) > self.max_output_chars}
 
     def _atomic_write(self, target: Path, data: bytes) -> None:
@@ -205,14 +218,29 @@ class CodingTools:
         if argv and argv[0] == sys.executable:
             argv = ["python3", *argv[1:]]
         self.policy.validate_command(argv)
+        if self.privacy_profile != "legacy" and any(
+            sensitive_path(self.workspace / arg, self.workspace, self.privacy_profile)
+            for arg in argv[1:] if not arg.startswith("-") and (self.workspace / arg).exists()
+        ):
+            raise PermissionError("model-facing command references a sensitive path")
         if argv[0] in {"python", "python3"}:
             argv = [sys.executable, *argv[1:]]
         log_path = self.log_dir / f"command-{len(list(self.log_dir.glob('command-*.log'))) + 1:04d}.log"
-        with log_path.open("wb") as log:
-            process = subprocess.run(argv, cwd=self.workspace, stdout=log, stderr=subprocess.STDOUT,
-                                     timeout=max(1, min(int(timeout), 900)), check=False)
-        size = log_path.stat().st_size
+        descriptor = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            with os.fdopen(descriptor, "wb") as log:
+                process = subprocess.run(argv, cwd=self.workspace, stdout=log, stderr=subprocess.STDOUT,
+                                         timeout=max(1, min(int(timeout), 900)), check=False)
+        finally:
+            # Also scrub timeout/failure logs; keep auxiliary output bounded.
+            size = log_path.stat().st_size
+            with log_path.open("rb") as log:
+                clean = redact(log.read(2_000_001).decode("utf-8", errors="replace"))
+            if size > 2_000_000:
+                clean = clean[:2_000_000] + "\n... log truncated at 2 MB ...\n"
+            log_path.write_text(clean, encoding="utf-8")
         with log_path.open("rb") as log:
+            size = log_path.stat().st_size
             if size <= self.max_output_chars:
                 raw = log.read()
             else:

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Callable
+from modai.security import redact
+from runtime_context import model_action_token, reset_model_action
 
 from roles import ROLES
 from tools.filesystem import file_exists, list_files, make_directory, read_file, replace_in_file, search_files, write_file
@@ -197,4 +199,8 @@ def execute_tool(name: str, args: dict[str, Any], allowed: tuple[str, ...]) -> s
         raise ValueError(f"Bilinmeyen araç: {name}")
     if not isinstance(args, dict):
         raise TypeError("Araç argümanları bir JSON nesnesi olmalı")
-    return str(tool.function(**args))[:12000]
+    token = model_action_token()
+    try:
+        return redact(str(tool.function(**args))[:12000])
+    finally:
+        reset_model_action(token)

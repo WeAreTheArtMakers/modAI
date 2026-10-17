@@ -120,7 +120,8 @@ def test_cloud_delegate_cannot_read_project_files(tmp_path):
         ModelResponse(tool_calls=[ToolCall('x', 'read', {'path':'private.txt'})]),
         ModelResponse(content='Public comparison only')])
     runtime.provider = 'cloud'
-    delegate = ReadOnlyDelegate(runtime, tmp_path, tmp_path/'.logs', SharedEvidenceCache())
+    delegate = ReadOnlyDelegate(runtime, tmp_path, tmp_path/'.logs', SharedEvidenceCache(),
+                                network_enabled=True, public_task='Compare public approaches')
     assert delegate.run('Compare public approaches')['memo'] == 'Public comparison only'
     assert 'PRIVATE_CONTENT_DO_NOT_SEND' not in json.dumps(runtime.requests)
     assert all(s['function']['name'] not in {'read', 'ls', 'grep', 'bash'} for s in runtime.requests[0]['tools'])

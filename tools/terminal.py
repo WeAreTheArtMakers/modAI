@@ -6,6 +6,8 @@ from pathlib import Path
 from typing import Sequence
 
 from runtime_context import get_workspace
+from runtime_context import is_model_action, privacy_profile
+from modai.security import sensitive_path
 
 
 ALLOWED_PROGRAMS = {
@@ -67,6 +69,11 @@ def _validate(args: list[str]) -> None:
 def run(command: Sequence[str] | str, timeout: int = 120) -> str:
     args = _arguments(command)
     _validate(args)
+    if is_model_action() and any(
+        sensitive_path(get_workspace() / part, get_workspace(), privacy_profile())
+        for part in args[1:] if not part.startswith("-") and (get_workspace() / part).exists()
+    ):
+        raise PermissionError("model-facing command references a sensitive path")
     timeout = max(1, min(int(timeout), 900))
     try:
         process = subprocess.run(

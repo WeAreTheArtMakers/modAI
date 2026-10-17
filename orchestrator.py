@@ -27,7 +27,7 @@ from evidence_cache import EvidenceCache
 from model_advisor import recommendation as model_recommendation
 from providers import CloudClient, contains_obvious_secret, save_api_key
 from roles import ENGLISH_TITLES, PLANNABLE_ROLES, RESERVED_ORCHESTRATION_ROLES, ROLES, role_prompt
-from runtime_context import get_workspace, set_internet_enabled, set_workspace
+from runtime_context import get_workspace, set_internet_enabled, set_privacy_profile, set_workspace
 from tool_registry import ROLE_TOOLS, execute_tool, schemas_for_role
 from tui import Dashboard, interactive_terminal
 from worktree_isolation import IsolatedWorktree
@@ -40,6 +40,7 @@ from modai.core.harness import CodingHarness
 from modai.core.context import ContextManager
 from modai.core.session import SessionStore
 from modai.models.ollama import OllamaRuntime
+from modai.security import redact, secure_atomic_text
 from modai.orchestration.router import TaskRouter
 
 try:
@@ -362,6 +363,7 @@ class Orchestrator:
             workspace = ROOT / workspace
         set_workspace(workspace, create=True)
         set_internet_enabled(settings.internet_enabled)
+        set_privacy_profile(settings.privacy_profile)
         if client is None:
             if Client is None:
                 raise RuntimeError("Ollama Python paketi yok. Önce ./setup.sh çalıştırın.")
@@ -463,6 +465,8 @@ class Orchestrator:
         if client is None:
             raise RuntimeError("Bulut istemcisi yapılandırılmadı")
         if use_cloud:
+            if not self.settings.internet_enabled or not self.settings.cloud_enabled:
+                raise PermissionError("Cloud request requires enabled internet and explicit cloud configuration")
             self._ensure_cloud_budget()
         if self._active_role in ROLES:
             active_title = self.role_title(self._active_role)
@@ -488,6 +492,8 @@ class Orchestrator:
                     self.usage["cloud_output_tokens"] += output_tokens
             if self._active_state is not None:
                 self._active_state["usage"] = dict(self.usage)
+                if use_cloud:
+                    self._active_state["cloud_cost_usd_estimate"] = self._cloud_cost_usd(self.usage)
                 self._active_state.setdefault('request_metrics', []).append({
                     'role': self._active_role, 'provider': provider,
                     'message_bytes': len(json.dumps(messages, ensure_ascii=False).encode()),
@@ -567,6 +573,10 @@ class Orchestrator:
 
     def _ensure_cloud_budget(self) -> None:
         used = self.usage["cloud_input_tokens"] + self.usage["cloud_output_tokens"]
+        estimated = self._cloud_cost_usd(self.usage)
+        if (estimated is not None and self.settings.cloud_usd_limit is not None
+                and estimated >= self.settings.cloud_usd_limit):
+            raise CloudBudgetPaused("Configured cloud USD limit reached; raise it explicitly to resume")
         while used >= self.settings.cloud_token_budget:
             extension = (
                 self.cloud_budget_handler(used, self.settings.cloud_token_budget)
@@ -587,6 +597,15 @@ class Orchestrator:
                 f"Added {int(extension):,} cloud tokens · new limit {self.settings.cloud_token_budget:,}",
             ))
 
+    def _cloud_cost_usd(self, usage: dict[str, Any]) -> float | None:
+        """Estimate from configured rates; unknown pricing is never represented as free."""
+        inbound = self.settings.cloud_input_usd_per_million
+        outbound = self.settings.cloud_output_usd_per_million
+        if inbound is None or outbound is None:
+            return None
+        return (int(usage.get("cloud_input_tokens", 0) or 0) * inbound +
+                int(usage.get("cloud_output_tokens", 0) or 0) * outbound) / 1_000_000
+
     def _friendly_error(self, exc: Exception) -> str:
         message = str(exc)
         lowered = message.lower()
@@ -594,7 +613,7 @@ class Orchestrator:
             return f"Ollama'ya bağlanılamadı ({self.settings.host}). `ollama serve` çalıştırın."
         if "not found" in lowered and "model" in lowered:
             return f"'{self.settings.model}' modeli bulunamadı. `ollama pull {self.settings.model}` çalıştırın."
-        return message
+        return redact(message)
 
     def _allowed_tools(self, role: str) -> tuple[str, ...]:
         tools = ROLE_TOOLS.get(role, ())
@@ -1076,13 +1095,13 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         self.write_allowed = write_allowed
         self.usage = normalized_usage()
         run_dir = RUNS / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        run_dir.mkdir(parents=True, exist_ok=False)
+        run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
         state = {
             "version": VERSION, "status": "running", "phase": "plan", "task": user_task,
             "workspace": str(get_workspace()), "model": self.settings.model,
             "write_allowed": write_allowed,
             'write_permission_source': permission_source,
-            "cloud_allowed": bool(allow_cloud and self.settings.cloud_enabled and not contains_obvious_secret(task)),
+            "cloud_allowed": bool(allow_cloud and self.settings.cloud_enabled and self.settings.internet_enabled and not contains_obvious_secret(user_task)),
             "cloud_token_budget": self.settings.cloud_token_budget,
             "created_at": datetime.now().isoformat(timespec="seconds"), "updated_at": "",
             "elapsed_seconds": 0.0, "plan": None, "outputs": [], "task_cursor": 0,
@@ -1213,6 +1232,13 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         elif event.kind == "usage":
             cloud_used = int(data.get("cloud_tokens", 0) or 0)
             cloud_budget = int(state.get("cloud_token_budget", self.settings.cloud_token_budget) or 0)
+            cloud_cost = self._cloud_cost_usd(data)
+            state["cloud_cost_usd_estimate"] = cloud_cost
+            if (cloud_cost is not None and self.settings.cloud_usd_limit is not None
+                    and cloud_cost >= self.settings.cloud_usd_limit):
+                state["cloud_budget_pause"] = True
+                if self._active_harness is not None:
+                    self._active_harness.session.abort()
             if cloud_used > cloud_budget:
                 extension = self.cloud_budget_handler(cloud_used, cloud_budget) if self.cloud_budget_handler else None
                 if extension is None:
@@ -1272,11 +1298,12 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             "task": task, "workspace": str(get_workspace()), "model": self.settings.model,
             "mode": route.mode, "route_reason": route.reason, "write_allowed": write_allowed,
             "write_permission_source": permission_source,
-            "cloud_allowed": bool(allow_cloud and self.settings.cloud_enabled and not contains_obvious_secret(task)),
+            "cloud_allowed": bool(allow_cloud and self.settings.cloud_enabled and self.settings.internet_enabled and not contains_obvious_secret(task)),
             "cloud_token_budget": self.settings.cloud_token_budget,
             "created_at": datetime.now().isoformat(timespec="seconds"), "updated_at": "",
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0,
-                      "local_tokens": 0, "cloud_tokens": 0},
+                      "local_tokens": 0, "cloud_tokens": 0,
+                      "cloud_input_tokens": 0, "cloud_output_tokens": 0},
             "changed_paths": [], "verification": {"verdict": "MISSING", "checks": []}, "final": "",
             "task_sources": [],
         }
@@ -1286,7 +1313,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         allowed = self._infer_write_allowed(task) if write_allowed is None else bool(write_allowed)
         route = TaskRouter().route(task, self.settings.harness_mode)
         run_dir = RUNS / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-        run_dir.mkdir(parents=True, exist_ok=False)
+        run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
         state = self._new_harness_state(task, allowed, permission_source, allow_cloud, route)
         if self.settings.internet_enabled:
             for url in reference_urls(task):
@@ -1331,6 +1358,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             max_write_chars=16000,
             max_auto_skills=self.settings.max_auto_skills,
             trust_project_skills=self.settings.trust_project_skills,
+            privacy_profile=self.settings.privacy_profile,
             visual_review_enabled=self.settings.visual_review,
             forced_skills=getattr(self, 'forced_skills', []),
             delegate_enabled=state.get("mode") == "orchestra",
@@ -1442,7 +1470,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             state["status"] = "completed" if quality_passed else "needs_attention"
             state["phase"] = "completed" if quality_passed else "blocked"
             self._save_state(run_dir, state)
-            (run_dir / "final.txt").write_text(final, encoding="utf-8")
+            secure_atomic_text(run_dir / "final.txt", final)
             total_tokens = self.usage["input_tokens"] + self.usage["output_tokens"]
             if quality_passed:
                 self.event("ok", self.t("Tamamlandı", "Completed") + f" · {len(state['outputs'])} " + self.t("uzman", "specialists") + f" · {total_tokens:,} token · {run_dir.name}")
@@ -2209,7 +2237,7 @@ uygun testleri çalıştır ve hangi bulgunun nasıl çözüldüğünü kanıtla
         roles = {item.strip() for item in self.settings.cloud_roles.split(",") if item.strip()}
         candidate = str(task.get("task", "")) + "\n" + str(task.get("deliverable", ""))
         allowed = (
-            bool(state.get("cloud_allowed")) and self.cloud_client is not None
+            bool(state.get("cloud_allowed")) and self.cloud_client is not None and self.settings.internet_enabled
             and bool(task.get("needs_web")) and task.get("role") in roles
         )
         if allowed and contains_obvious_secret(candidate):
@@ -2221,11 +2249,14 @@ uygun testleri çalıştır ve hangi bulgunun nasıl çözüldüğünü kanıtla
         return allowed
 
     def _cloud_task_prompt(self, task: dict[str, Any]) -> str:
+        # Do not serialize planner metadata or local context into a cloud brief.
+        public_brief = {key: str(task.get(key, ""))[:1500]
+                        for key in ("task", "deliverable") if task.get(key)}
         return f"""Bu, açık internet/bulut kullanımına izin verilmiş bağımsız bir iş paketidir.
 Yalnızca aşağıdaki kamuya açık araştırma görevini çöz. Yerel dosyalara, çalışma klasörüne,
 önceki ekip çıktılarına veya gizli verilere erişimin yoktur. URL ve kanıt sağla.
 
-{json.dumps(task, ensure_ascii=False, indent=2)}
+{json.dumps(public_brief, ensure_ascii=False, indent=2)}
 """
 
     def _task_prompt(self, state: dict[str, Any], task: dict[str, Any]) -> str:
@@ -2426,9 +2457,7 @@ varsa söylenebilir. Salt-okunur görevde değişiklik önerisini tamamlanmayan 
     def _save_state(run_dir: Path, state: dict[str, Any]) -> None:
         state["updated_at"] = datetime.now().isoformat(timespec="seconds")
         target = run_dir / "state.json"
-        temporary = run_dir / "state.json.tmp"
-        temporary.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        temporary.replace(target)
+        secure_atomic_text(target, json.dumps(state, ensure_ascii=False, indent=2))
 
     def _resolve_run(self, identifier: str | None) -> Path:
         runs = self.list_runs()
@@ -2478,6 +2507,7 @@ varsa söylenebilir. Salt-okunur görevde değişiklik önerisini tamamlanmayan 
                 "status": state.get("status"), "phase": state.get("phase"),
                 "mode": state.get("mode", "legacy"), "workspace": state.get("workspace"),
                 "messages": len(store.messages()), "usage": state.get("usage", {}),
+                "cloud_cost_usd_estimate": state.get("cloud_cost_usd_estimate"),
                 "changed_paths": state.get("changed_paths", []),
                 "verification": state.get("verification", state.get("artifact_status", {}))}
 
@@ -2721,7 +2751,7 @@ def edit_orchestration_profile(orchestrator: Orchestrator, ui: TerminalUI, dashb
 
 
 def setup_cloud(orchestrator: Orchestrator, ui: TerminalUI, dashboard: Dashboard | None = None) -> None:
-    providers = ["openai", "anthropic", "google"]
+    providers = ["openai", "anthropic", "google", "groq"]
     if dashboard is not None:
         choice = dashboard.choose(
             ui.t("BULUT SAĞLAYICI", "CLOUD PROVIDER"),
@@ -2733,9 +2763,9 @@ def setup_cloud(orchestrator: Orchestrator, ui: TerminalUI, dashboard: Dashboard
         provider = providers[choice]
         dashboard.clear()
     else:
-        provider = input("provider [openai/anthropic/google] › ").strip().lower()
+        provider = input("provider [openai/anthropic/google/groq] › ").strip().lower()
     if provider not in providers:
-        raise ValueError("provider openai, anthropic veya google olmalı")
+        raise ValueError("provider openai, anthropic, google veya groq olmalı")
     model = input(f"{provider} model › ").strip()
     if not model:
         raise ValueError("Bulut modeli boş olamaz")

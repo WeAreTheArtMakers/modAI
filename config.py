@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from modai.security import PRIVACY_PROFILES
 
 
 ROOT = Path(__file__).resolve().parent
@@ -53,8 +55,25 @@ class Settings:
     model_max_output_tokens: int = 4096
     max_auto_skills: int = 2
     trust_project_skills: bool = False
+    privacy_profile: str = "guarded"
+    cloud_input_usd_per_million: float | None = None
+    cloud_output_usd_per_million: float | None = None
+    cloud_usd_limit: float | None = None
+    cloud_billing_tier: str = "unknown"
 
     def validate(self) -> None:
+        if self.privacy_profile not in PRIVACY_PROFILES:
+            raise ValueError('privacy_profile must be guarded, strict or legacy')
+        if self.cloud_billing_tier not in {'unknown', 'free', 'paid'}:
+            raise ValueError('cloud_billing_tier must be unknown, free or paid')
+        for name in ('cloud_input_usd_per_million', 'cloud_output_usd_per_million', 'cloud_usd_limit'):
+            value = getattr(self, name)
+            if value is not None and (type(value) not in (int, float) or not math.isfinite(value)
+                                      or not 0 <= value < 1_000_000):
+                raise ValueError(f'{name} must be a nonnegative finite number')
+        if self.cloud_usd_limit is not None and (self.cloud_usd_limit == 0 or
+                self.cloud_input_usd_per_million is None or self.cloud_output_usd_per_million is None):
+            raise ValueError('cloud_usd_limit requires positive limit and explicit input/output prices')
         if not 0 <= self.max_auto_skills <= 3:
             raise ValueError('max_auto_skills must be 0–3')
         if not self.model.strip():
@@ -83,8 +102,8 @@ class Settings:
             raise ValueError("agent_retries 0 ile 10 arasında olmalı")
         if self.language not in {"tr", "en"}:
             raise ValueError("language yalnızca tr veya en olabilir")
-        if self.cloud_provider not in {"openai", "anthropic", "google"}:
-            raise ValueError("cloud_provider openai, anthropic veya google olmalı")
+        if self.cloud_provider not in {"openai", "anthropic", "google", "groq"}:
+            raise ValueError("cloud_provider openai, anthropic, google veya groq olmalı")
         if self.cloud_enabled and not self.cloud_model.strip():
             raise ValueError("cloud_enabled açıkken cloud_model belirtilmeli")
         if self.execution_mode not in {"sequential", "adaptive", "parallel"}:
@@ -184,6 +203,11 @@ def load_settings(path: Path = DEFAULT_CONFIG) -> Settings:
         "MODAI_MODEL_TIMEOUT_SECONDS": ("model_timeout_seconds", float),
         "MODAI_MODEL_RETRIES": ("model_retries", int),
         "MODAI_MODEL_MAX_OUTPUT_TOKENS": ("model_max_output_tokens", int),
+        "MODAI_PRIVACY_PROFILE": ("privacy_profile", str),
+        "MODAI_CLOUD_INPUT_USD_PER_MILLION": ("cloud_input_usd_per_million", float),
+        "MODAI_CLOUD_OUTPUT_USD_PER_MILLION": ("cloud_output_usd_per_million", float),
+        "MODAI_CLOUD_USD_LIMIT": ("cloud_usd_limit", float),
+        "MODAI_CLOUD_BILLING_TIER": ("cloud_billing_tier", str),
     }
     for env_name, (setting_name, convert) in env_map.items():
         value = os.getenv(env_name)

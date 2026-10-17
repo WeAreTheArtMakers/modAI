@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
+from modai.security import redact_data
 
 
 @dataclass(slots=True)
@@ -23,7 +24,7 @@ class EventBus:
         self._subscribers.append(callback)
 
     def emit(self, kind: str, **data: Any) -> HarnessEvent:
-        event = HarnessEvent(kind, data)
+        event = HarnessEvent(kind, redact_data(data))
         for callback in tuple(self._subscribers):
             callback(event)
         return event

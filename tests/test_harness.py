@@ -191,7 +191,8 @@ def test_cloud_delegate_usage_is_separate_while_writer_stays_local():
         cloud = ScriptedRuntime([ModelResponse(content="public evidence", usage=Usage(100, 20))])
         cloud.provider = "cloud"
         agent = CodingHarness(runtime=main, delegate_runtime=cloud, delegate_enabled=True,
-                              workspace=root, run_dir=root / ".run", task="Create report.md")
+                              workspace=root, run_dir=root / ".run", task="Create report.md",
+                              network_enabled=True)
         result = agent.run()
         assert result.status == "completed"
         assert result.usage["local_tokens"] == 37

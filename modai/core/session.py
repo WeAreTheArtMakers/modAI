@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from collections import deque
 from pathlib import Path
@@ -16,6 +17,12 @@ class SessionStore:
         self.run_dir = run_dir
         self.path = run_dir / "session.jsonl"
         self.run_dir.mkdir(parents=True, exist_ok=True)
+        if os.name == "posix":
+            self.run_dir.chmod(0o700)
+            if self.path.exists():
+                if self.path.is_symlink():
+                    raise PermissionError("session path must not be a symbolic link")
+                self.path.chmod(0o600)
         self._lock = threading.RLock()
         self._steer: deque[str] = deque()
         self._follow_up: deque[str] = deque()
@@ -24,7 +31,9 @@ class SessionStore:
     def append(self, record: dict[str, Any]) -> None:
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":"))
         with self._lock:
-            with self.path.open("a", encoding="utf-8") as handle:
+            flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(self.path, flags, 0o600)
+            with os.fdopen(descriptor, "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
                 handle.flush()
 

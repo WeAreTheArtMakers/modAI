@@ -91,6 +91,12 @@ class OllamaRuntime:
             "keep_alive": self.keep_alive,
             "think": think,
         }
+        if tools and not self.supports_native_tools:
+            kwargs.pop("tools", None)
+            kwargs["messages"] = list(messages) + [{"role": "user", "content": (
+                "Native tools are unavailable. For one tool call only, return strict JSON "
+                '{"tool":"name","args":{...}}. Available schemas: ' + json.dumps(tools, ensure_ascii=False)
+            )}]
         if self.stream:
             kwargs["stream"] = True
         try:
@@ -113,7 +119,7 @@ class OllamaRuntime:
             raw = self.client.chat(model=self.model, messages=fallback, options=options,
                                    keep_alive=self.keep_alive, think=think)
         if not self.stream or isinstance(raw, Mapping) or not isinstance(raw, Iterable):
-            return self._classify(self._normalize(raw))
+            return self._classify(self._normalize(raw), fallback=bool(tools and not self.supports_native_tools))
         content: list[str] = []
         thinking: list[str] = []
         calls: list[ToolCall] = []
@@ -134,10 +140,20 @@ class OllamaRuntime:
                 usage.output_tokens = response.usage.output_tokens
             reason = response.stop_reason or reason
         return self._classify(ModelResponse("".join(content), calls, usage, reason,
-                             reason in {"length", "max_tokens"}, "".join(thinking)))
+                             reason in {"length", "max_tokens"}, "".join(thinking)),
+                             fallback=bool(tools and not self.supports_native_tools))
 
     @staticmethod
-    def _classify(response: ModelResponse) -> ModelResponse:
+    def _classify(response: ModelResponse, fallback: bool = False) -> ModelResponse:
+        if fallback and not response.tool_calls:
+            try:
+                value = json.loads(response.content.strip())
+            except json.JSONDecodeError:
+                value = None
+            if (isinstance(value, dict) and isinstance(value.get("tool"), str)
+                    and isinstance(value.get("args"), dict)):
+                response.tool_calls = [ToolCall(uuid.uuid4().hex, value["tool"], value["args"])]
+                response.content = ""
         if not response.content.strip() and not response.tool_calls:
             response.error_code = "EMPTY_VISIBLE_MODEL_RESPONSE"
         return response
