@@ -92,6 +92,7 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         forced_skills: list[str] | None = None,
         max_auto_skills: int = 2,
         trust_project_skills: bool = False,
+        privacy_profile: str = "guarded",
         visual_review_enabled: bool = False,
         event: Callable[[HarnessEvent], None] | None = None,
     ) -> None:
@@ -111,7 +112,8 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
             network=network_enabled,
             delegate=delegate_enabled,
         )
-        self.coding_tools = CodingTools(self.workspace, ToolPolicy(capabilities), run_dir / "logs")
+        self.coding_tools = CodingTools(self.workspace, ToolPolicy(capabilities), run_dir / "logs",
+                                        privacy_profile=privacy_profile)
         evidence = SharedEvidenceCache()
         delegate = (
             ReadOnlyDelegate(
@@ -120,6 +122,8 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
                 run_dir / "delegate-logs",
                 evidence,
                 network_enabled,
+                privacy_profile=privacy_profile,
+                public_task=task,
             ).run
             if delegate_enabled
             else None
@@ -148,6 +152,8 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
             "total_tokens": 0,
             "local_tokens": 0,
             "cloud_tokens": 0,
+            "cloud_input_tokens": 0,
+            "cloud_output_tokens": 0,
         }
         self.verifier = ProjectVerifier(self.workspace, task, self.coding_tools.bash, write_allowed)
         self.registry.verify = lambda: self._verify().as_dict()
@@ -226,6 +232,9 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         actual_provider = provider or self.runtime.provider
         target = "local_tokens" if actual_provider in {"local", "fake"} else "cloud_tokens"
         self.usage[target] += response.usage.total_tokens
+        if target == "cloud_tokens":
+            self.usage["cloud_input_tokens"] += response.usage.input_tokens
+            self.usage["cloud_output_tokens"] += response.usage.output_tokens
         self.events.emit("usage", **self.usage, provider=actual_provider)
 
     def _assistant_message(self, response: ModelResponse) -> dict[str, Any]:

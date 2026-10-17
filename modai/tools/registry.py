@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import hashlib
 from typing import Any
+from modai.security import redact_data
 
 from modai.core.evidence import SharedEvidenceCache
 from .coding import MODEL_WRITE_MAX_CHARS, CodingTools
@@ -179,7 +180,7 @@ class ToolRegistry:
 
     @staticmethod
     def model_result(result: dict[str, Any], limit: int = 8_000) -> str:
-        value = json.dumps(result, ensure_ascii=False, separators=(",", ":"))
+        value = json.dumps(redact_data(result), ensure_ascii=False, separators=(",", ":"))
         if len(value) <= limit:
             return value
         return value[:limit] + '\n{"truncated":true,"hint":"Use a narrower read, grep, or line range."}'

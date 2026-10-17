@@ -4,6 +4,7 @@ import json
 import os
 import re
 import subprocess
+import socket
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
@@ -14,12 +15,24 @@ PROVIDER_ENV_KEYS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
     "google": "GOOGLE_API_KEY",
+    "groq": "GROQ_API_KEY",
 }
 PROVIDER_KEYCHAIN_SERVICES = {
     "openai": "MODAI OpenAI API Key",
     "anthropic": "MODAI Anthropic API Key",
     "google": "MODAI Google API Key",
+    "groq": "MODAI Groq API Key",
 }
+
+
+class CloudRequestError(RuntimeError):
+    """Safe, classified provider failure; remote response bodies are never exposed."""
+
+    def __init__(self, provider: str, code: str, retry_after: int | None = None) -> None:
+        self.code = code
+        self.retry_after = retry_after
+        suffix = f"; retry after {retry_after}s" if retry_after is not None else ""
+        super().__init__(f"{provider} request failed: {code}{suffix}")
 
 
 def api_key_for(provider: str) -> str:
@@ -66,7 +79,7 @@ def contains_obvious_secret(text: str) -> bool:
 class CloudClient:
     def __init__(self, provider: str, model: str, timeout: float = 600.0) -> None:
         if provider not in PROVIDER_ENV_KEYS:
-            raise ValueError("Bulut sağlayıcısı openai, anthropic veya google olmalı")
+            raise ValueError("Bulut sağlayıcısı openai, anthropic, google veya groq olmalı")
         if not model.strip():
             raise ValueError("Bulut modeli boş olamaz")
         self.provider = provider
@@ -77,6 +90,8 @@ class CloudClient:
         messages = kwargs.get("messages", [])
         temperature = float(kwargs.get("options", {}).get("temperature", 0.25))
         num_predict = int(kwargs.get("options", {}).get("num_predict", 2048))
+        if self.provider == "groq":
+            return self._groq(messages, temperature, num_predict, kwargs.get("tools") or [])
         if self.provider == "openai":
             return self._openai(messages, temperature, num_predict)
         if self.provider == "anthropic":
@@ -90,12 +105,69 @@ class CloudClient:
         )
         try:
             with urlopen(request, timeout=self.timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+                data = json.loads(response.read().decode("utf-8"))
+                if not isinstance(data, dict):
+                    raise CloudRequestError(self.provider, "invalid_response")
+                return data
         except HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:1000]
-            raise RuntimeError(f"{self.provider} HTTP {exc.code}: {detail}") from exc
-        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-            raise RuntimeError(f"{self.provider} isteği başarısız: {exc}") from exc
+            retry = exc.headers.get("Retry-After") if exc.headers else None
+            retry_after = int(retry) if retry and retry.isdecimal() else None
+            code = {401: "authentication", 403: "authorization", 408: "timeout", 429: "rate_limit"}.get(exc.code)
+            if code is None:
+                code = "transient" if exc.code >= 500 else "invalid_request"
+            if code == "invalid_request" and self.provider == "groq":
+                # Classify unsupported native tools without exposing provider text.
+                body = exc.read(4096).decode("utf-8", "replace").lower()
+                if ("tool" in body or "function" in body) and any(
+                    marker in body for marker in ("unsupported", "not support", "does not support")
+                ):
+                    code = "unsupported_tools"
+            raise CloudRequestError(self.provider, code, retry_after) from exc
+        except (URLError, TimeoutError, socket.timeout) as exc:
+            raise CloudRequestError(self.provider, "timeout" if isinstance(exc, (TimeoutError, socket.timeout)) else "network") from exc
+        except (json.JSONDecodeError, UnicodeError) as exc:
+            raise CloudRequestError(self.provider, "invalid_response") from exc
+
+    def _groq(self, messages: list[dict[str, Any]], temperature: float, limit: int,
+              tools: list[dict[str, Any]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {"model": self.model, "messages": messages,
+                                   "temperature": temperature, "max_completion_tokens": limit}
+        if tools:
+            payload["tools"] = tools
+            payload["tool_choice"] = "auto"
+        data = self._request("https://api.groq.com/openai/v1/chat/completions", payload,
+                             {"Authorization": f"Bearer {api_key_for('groq')}"})
+        choices = data.get("choices") or []
+        if not choices or not isinstance(choices[0], dict):
+            raise CloudRequestError(self.provider, "invalid_response")
+        choice = choices[0]
+        message = choice.get("message") or {}
+        if not isinstance(message, dict):
+            raise CloudRequestError(self.provider, "invalid_response")
+        calls = []
+        for item in message.get("tool_calls") or []:
+            fn = item.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments", "{}"))
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise CloudRequestError(self.provider, "invalid_tool_arguments") from exc
+            if not isinstance(args, dict) or not isinstance(fn.get("name"), str):
+                raise CloudRequestError(self.provider, "invalid_tool_arguments")
+            calls.append({"id": str(item.get("id") or ""), "type": "function",
+                          "function": {"name": fn["name"], "arguments": args}})
+        usage = data.get("usage") or {}
+        if not isinstance(usage, dict) or not {"prompt_tokens", "completion_tokens"}.issubset(usage):
+            raise CloudRequestError(self.provider, "usage_unavailable")
+        try:
+            input_tokens, output_tokens = int(usage["prompt_tokens"]), int(usage["completion_tokens"])
+            if input_tokens < 0 or output_tokens < 0:
+                raise ValueError("negative usage")
+        except (ValueError, TypeError) as exc:
+            raise CloudRequestError(self.provider, "invalid_usage") from exc
+        reason = str(choice.get("finish_reason") or "stop")
+        return {"message": {"content": str(message.get("content") or ""), "tool_calls": calls},
+                "prompt_eval_count": input_tokens,
+                "eval_count": output_tokens, "done_reason": reason}
 
     def _openai(self, messages: list[dict[str, Any]], temperature: float, limit: int) -> dict[str, Any]:
         instructions = "\n\n".join(str(item.get("content", "")) for item in messages if item.get("role") == "system")

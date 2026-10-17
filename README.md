@@ -161,13 +161,19 @@ modai --no-internet "TASK"
 modai --allow-cloud "Public research task"
 ```
 
-Cloud is off by default. Configure it interactively with `/cloud setup`, then opt in per task with `--allow-cloud` or `/hybrid TASK`. In orchestra mode, only the bounded delegate can use that cloud runtime; the persistent writer remains local. Prompts containing obvious secrets disable cloud routing. The cloud token budget is a paid-provider cost guard only:
+Cloud is off by default. Configure OpenAI, Anthropic, Google, or Groq interactively with `/cloud setup`, then opt in per task with `--allow-cloud` or `/hybrid TASK`. In orchestra mode, only the bounded read-only delegate can use that cloud runtime; the persistent writer remains local. Internet must also be enabled. Groq uses its OpenAI-compatible chat-completions API; set `GROQ_API_KEY` in the environment or use the macOS Keychain setup. No provider is a paid fallback for a local failure. Prompts containing obvious secrets disable cloud routing. The cloud token budget is a paid-provider cost guard only:
 
 ```bash
 modai --cloud-token-budget 1000000 --allow-cloud "TASK"
 ```
 
 Local Ollama usage has no token ceiling. When a cloud budget is reached, MODAI asks whether to add more tokens or pause; it does not pretend the unfinished task completed.
+
+Privacy profiles: `MODAI_PRIVACY_PROFILE=guarded` is the default and blocks common credential files (including `.env`, private keys, and cloud credential folders) in model-facing file tools. `strict` blocks additional hidden and secret-named paths. `legacy` is an explicit compatibility override. Direct user-controlled file operations are distinct from model tool calls. Auxiliary command logs are scrubbed and run/session files are private (`0700` directories, `0600` files on POSIX); canonical session transcripts retain content so resume works. Keep run directories private and encrypted at rest if necessary.
+
+These controls are **not an OS sandbox**: model-initiated project scripts/tests may still read files or environment variables under your user account. Use a separate OS account/container and a sanitized workspace for untrusted repositories. A user prompt can itself contain private context; only opt into cloud for a public research task. Cloud delegates get the original task rather than model-authored file excerpts, and their tools are restricted to public web research. Cloud main-coder access remains disabled pending a separate data-scope permission design.
+
+Optional `cloud_billing_tier` (`unknown`, `free`, `paid`) records your account classification; it is not inferred from provider name. `cloud_input_usd_per_million` and `cloud_output_usd_per_million` are separate user-supplied rates. Without both, estimated USD cost is **unknown**, never zero. `cloud_usd_limit` requires both prices; the current guard pauses after the recorded request reaches the limit, so one in-flight request can exceed it. Token budgets remain the primary bound. Rate limits are surfaced with a safe error category and `Retry-After` when available; MODAI does not automatically retry paid requests.
 
 ### Interface and diagnostics
 

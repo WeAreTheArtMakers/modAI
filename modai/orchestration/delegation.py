@@ -15,11 +15,15 @@ class ReadOnlyDelegate:
 
     def __init__(self, runtime: ModelRuntime, workspace: Path, log_dir: Path,
                  evidence: SharedEvidenceCache, network_enabled: bool = False,
-                 max_turns: int = 4) -> None:
+                 max_turns: int = 4, privacy_profile: str = "guarded",
+                 public_task: str | None = None) -> None:
         self.runtime = runtime
+        self.network_enabled = network_enabled
+        self.public_task = public_task
         self.registry = ToolRegistry(CodingTools(
             workspace, ToolPolicy(Capabilities(read=True, write=False, test=False,
                                                network=network_enabled)), log_dir,
+            privacy_profile=privacy_profile,
         ), evidence=evidence)
         self.max_turns = max_turns
 
@@ -28,7 +32,14 @@ class ReadOnlyDelegate:
         # not filesystem contents, test logs or private project instructions.
         if self.runtime.provider not in {'local', 'fake'}:
             from providers import contains_obvious_secret
-            if contains_obvious_secret(task + '\n' + focus):
+            if not self.network_enabled:
+                raise PermissionError('Cloud delegation requires network permission')
+            # Model-authored delegation arguments can contain private source or
+            # logs. Cloud receives only the original, consented task, never focus.
+            if self.public_task is None:
+                raise PermissionError('Cloud delegation requires a public user task')
+            task, focus = self.public_task, ''
+            if contains_obvious_secret(task):
                 raise PermissionError('Cloud delegation rejected: task contains a secret')
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": (
