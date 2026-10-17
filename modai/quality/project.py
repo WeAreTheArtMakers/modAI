@@ -77,15 +77,21 @@ def project_instructions(workspace: Path) -> str:
 
 class ProjectVerifier:
     def __init__(self, workspace: Path, task: str, command_runner: Callable[[list[str], int], dict[str, Any]],
-                 write_allowed: bool = True) -> None:
+                 write_allowed: bool = True, allow_project_commands: bool = True) -> None:
         self.workspace = workspace
         self.task = task
         self.command_runner = command_runner
         self.write_allowed = write_allowed
+        self.allow_project_commands = allow_project_commands
         self.sequence = 0
 
     def _command_checks(self) -> list[CheckResult]:
         commands = discover_commands(self.workspace)
+        if commands and not self.allow_project_commands:
+            return [CheckResult("project_commands", "FAIL", [
+                "Project scripts/tests were not executed. Explicitly enable trust_project_commands "
+                "for this workspace after reviewing them."
+            ], {"discovered": [name for name, _ in commands[:4]]})]
         results: list[CheckResult] = []
         for name, command in commands[:4]:
             try:

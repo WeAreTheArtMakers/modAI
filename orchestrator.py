@@ -42,6 +42,9 @@ from modai.core.session import SessionStore
 from modai.models.ollama import OllamaRuntime
 from modai.security import redact, secure_atomic_text
 from modai.orchestration.router import TaskRouter
+from modai.orchestration.coordinator import AdaptiveOrchestra
+from modai.orchestration.scheduler import (LocalInferenceScheduler, ResourceSnapshot,
+                                           effective_context, mac_resource_snapshot)
 
 try:
     from ollama import Client
@@ -356,6 +359,7 @@ class Orchestrator:
         event: Callable[[str, str], None] | None = None,
         client: Any | None = None,
         cloud_budget_handler: Callable[[int, int], int | None] | None = None,
+        resource_probe: Callable[[], ResourceSnapshot] | None = None,
     ) -> None:
         settings.validate()
         workspace = Path(settings.workspace).expanduser()
@@ -380,6 +384,7 @@ class Orchestrator:
         )
         self.event = event or (lambda _kind, _message: None)
         self.cloud_budget_handler = cloud_budget_handler
+        self.resource_probe = resource_probe or mac_resource_snapshot
         self.tool_trace: list[dict[str, Any]] = []
         self.native_tools = True
         self.write_allowed = True
@@ -1156,7 +1161,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         self.event("ok", self.t("Devam ediyor", "Resuming") + f": {run_dir.name} · {state['phase']}")
         return self._continue(run_dir, state)
 
-    def _harness_runtime(self) -> OllamaRuntime:
+    def _harness_runtime(self, context_size: int | None = None) -> OllamaRuntime:
         # Pass model_timeout_seconds to the underlying Ollama client so that
         # the harness timeout aligns with the configured value instead of
         # relying on the global Client timeout set at construction time.
@@ -1166,7 +1171,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         return OllamaRuntime(
             timed_client, self.settings.model,
             options={
-                "num_ctx": self.settings.context_size,
+                "num_ctx": context_size or self.settings.context_size,
                 "temperature": self.settings.temperature,
                 "top_p": 0.9,
                 "top_k": 20,
@@ -1183,7 +1188,8 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         data = event.data
         material_change = False
         if event.kind == "harness_started":
-            self.event('task_reset', '')
+            if state.get("mode") != "orchestra":
+                self.event('task_reset', '')
             self.event("ok", self.t("Kalıcı Kod Virtüözü oturumu başladı", "Persistent Code Virtuoso session started"))
         elif event.kind == "model_started":
             self._harness_visible_chars = 0
@@ -1312,6 +1318,11 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         permission_source = "inferred" if write_allowed is None else "explicit"
         allowed = self._infer_write_allowed(task) if write_allowed is None else bool(write_allowed)
         route = TaskRouter().route(task, self.settings.harness_mode)
+        if get_workspace().resolve() == Path.home().resolve():
+            self.event("warn", self.t(
+                "Çalışma klasörü ev dizininiz; kapsamı dar bir proje klasörü seçmeniz önerilir",
+                "Workspace is your home directory; choose a narrower project folder",
+            ))
         run_dir = RUNS / datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         run_dir.mkdir(parents=True, exist_ok=False, mode=0o700)
         state = self._new_harness_state(task, allowed, permission_source, allow_cloud, route)
@@ -1338,7 +1349,24 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         return self._execute_harness(run_dir, state, resume=True)
 
     def _execute_harness(self, run_dir: Path, state: dict[str, Any], resume: bool) -> str:
-        runtime = self._harness_runtime()
+        orchestra = state.get("mode") == "orchestra"
+        snapshot = self.resource_probe() if orchestra else None
+        context_size = self.settings.context_size
+        if orchestra and snapshot is not None:
+            context_size, warning = effective_context(
+                context_size, self.settings.orchestra_resource_profile, snapshot)
+            state.setdefault("orchestra", {}).update({
+                "effective_context": context_size, "local_inference_concurrency": 1,
+                "memory": {"total_bytes": snapshot.total_bytes, "free_percent": snapshot.free_percent,
+                           "source": snapshot.source},
+            })
+            self.event("score", f"MODEL {self.settings.model} · CTX {context_size} · LOCAL 1")
+            if warning:
+                self.event("warn", warning)
+        local_runtime = self._harness_runtime(context_size)
+        runtime = (LocalInferenceScheduler(local_runtime, wait_timeout=self.settings.model_timeout_seconds,
+                                           probe=self.resource_probe)
+                   if orchestra else local_runtime)
         delegate_runtime = runtime
         if state.get("cloud_allowed") and self.cloud_client is not None:
             delegate_runtime = OllamaRuntime(
@@ -1350,7 +1378,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         harness = CodingHarness(
             runtime=runtime, workspace=get_workspace(), run_dir=run_dir,
             task=str(state["task"]), write_allowed=bool(state.get("write_allowed", True)),
-            context_size=self.settings.context_size,
+            context_size=context_size,
             compaction_reserve_tokens=self.settings.compaction_reserve_tokens,
             repair_rounds=self.settings.repair_rounds,
             max_turns=self.settings.harness_max_turns,
@@ -1359,6 +1387,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             max_auto_skills=self.settings.max_auto_skills,
             trust_project_skills=self.settings.trust_project_skills,
             privacy_profile=self.settings.privacy_profile,
+            allow_project_commands=(not orchestra or self.settings.trust_project_commands),
             visual_review_enabled=self.settings.visual_review,
             forced_skills=getattr(self, 'forced_skills', []),
             delegate_enabled=state.get("mode") == "orchestra",
@@ -1373,7 +1402,18 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             harness.verifier.sequence = int(state.get('verification', {}).get('sequence', 0))
         self._active_harness = harness
         try:
-            result = harness.run(resume=resume)
+            if orchestra:
+                coordinator = AdaptiveOrchestra(
+                    harness, runtime, delegate_runtime, task=str(state["task"]),
+                    workspace=get_workspace(), run_dir=run_dir, state=state,
+                    network_enabled=self.settings.internet_enabled,
+                    privacy_profile=self.settings.privacy_profile,
+                    progress=lambda label, detail: self.event("score", f"{label} · {detail}"),
+                    persist=lambda: self._save_state(run_dir, state),
+                )
+                result = coordinator.run(resume=resume)
+            else:
+                result = harness.run(resume=resume)
         except KeyboardInterrupt:
             state.update({"status": "paused", "phase": "interrupted",
                           "changed_paths": sorted(harness.coding_tools.mutated_paths),
@@ -1391,7 +1431,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             )
         state.update({"status": result.status,
                       "version": VERSION,
-                      "phase": "complete" if result.status == "completed" else "cloud_budget" if paused_for_cloud else "needs_attention",
+                      "phase": "complete" if result.status == "completed" else "cloud_budget" if paused_for_cloud else "paused" if result.status == "paused" else "needs_attention",
                       "usage": result.usage, "changed_paths": result.changed_paths,
                       "verification": result.verification, "final": result.final,
                       "turns": result.turns, "metrics": result.metrics,
@@ -2712,6 +2752,8 @@ def edit_orchestration_profile(orchestrator: Orchestrator, ui: TerminalUI, dashb
     original = {name: getattr(orchestrator.settings, name) for name in EDITABLE_SETTINGS}
     original["execution_mode"] = orchestrator.settings.execution_mode
     original["harness_mode"] = orchestrator.settings.harness_mode
+    original["orchestra_resource_profile"] = orchestrator.settings.orchestra_resource_profile
+    original["trust_project_commands"] = orchestrator.settings.trust_project_commands
     try:
         persisted = False
         for name, (converter, minimum, maximum) in EDITABLE_SETTINGS.items():
@@ -2730,12 +2772,24 @@ def edit_orchestration_profile(orchestrator: Orchestrator, ui: TerminalUI, dashb
             if raw not in {"auto", "solo", "orchestra"}:
                 raise ValueError("harness_mode: auto, solo or orchestra")
             orchestrator.settings.harness_mode = raw
+        raw = input(f"orchestra_resource_profile [{orchestrator.settings.orchestra_resource_profile}] (fast/balanced/extended) › ").strip().lower()
+        if raw:
+            if raw not in {"fast", "balanced", "extended"}:
+                raise ValueError("orchestra_resource_profile: fast, balanced or extended")
+            orchestrator.settings.orchestra_resource_profile = raw
+        raw = input(f"trust_project_commands [{'on' if orchestrator.settings.trust_project_commands else 'off'}] (on/off) › ").strip().lower()
+        if raw:
+            if raw not in {"on", "off"}:
+                raise ValueError("trust_project_commands: on or off")
+            orchestrator.settings.trust_project_commands = raw == "on"
         save = input(ui.t("Bu ayarları config.json içine kalıcı kaydet? [e/H] › ", "Save these settings to config.json? [y/N] › ")).strip().lower()
         if save in {"e", "evet", "y", "yes"}:
             data = json.loads(DEFAULT_CONFIG.read_text(encoding="utf-8")) if DEFAULT_CONFIG.exists() else {}
             data.update({name: getattr(orchestrator.settings, name) for name in EDITABLE_SETTINGS})
             data["execution_mode"] = orchestrator.settings.execution_mode
             data["harness_mode"] = orchestrator.settings.harness_mode
+            data["orchestra_resource_profile"] = orchestrator.settings.orchestra_resource_profile
+            data["trust_project_commands"] = orchestrator.settings.trust_project_commands
             temporary = DEFAULT_CONFIG.with_suffix(".json.tmp")
             temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             temporary.replace(DEFAULT_CONFIG)
@@ -3099,6 +3153,10 @@ def dashboard_loop(orchestrator: Orchestrator, ui: TerminalUI, dashboard: Dashbo
                 ),
                 tx(f"Azami aktif süre: {settings.max_hours:g} saat", f"Maximum active duration: {settings.max_hours:g} hours"),
                 tx("Yerel token sınırı: yok", "Local token limit: unlimited"),
+                tx(f"Orkestra kaynağı: {settings.orchestra_resource_profile} · yerel eşzamanlılık 1",
+                   f"Orchestra resource: {settings.orchestra_resource_profile} · local concurrency 1"),
+                tx(f"Proje komutları: {'izinli' if settings.trust_project_commands else 'onay gerekli'}",
+                   f"Project commands: {'allowed' if settings.trust_project_commands else 'approval required'}"),
                 tx(f"Bulut maliyet koruması: {settings.cloud_token_budget:,} token", f"Cloud cost guard: {settings.cloud_token_budget:,} tokens"),
                 tx(f"İnternet araştırması: {'açık' if settings.internet_enabled else 'kapalı'}", f"Internet research: {'on' if settings.internet_enabled else 'off'}"),
                 tx(
@@ -3131,6 +3189,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--skills', action='store_true', help='List available domain skills and diagnostics')
     parser.add_argument('--skill', action='append', default=[], help='Force a domain skill (repeatable, maximum 3)')
     parser.add_argument('--trust-project-skills', action='store_true', help='Trust .modai/skills in this selected workspace')
+    parser.add_argument('--trust-project-commands', action='store_true',
+                        help='Allow discovered project test/build scripts in orchestra mode after reviewing them')
+    parser.add_argument('--resource-profile', choices=('fast', 'balanced', 'extended'),
+                        help='Orchestra local memory/context target (default: balanced)')
     parser.add_argument("--workspace", help="Ajanların çalışacağı klasör")
     parser.add_argument("--resume", nargs="?", const="", metavar="RUN_ID", help="Duraklatılmış göreve devam et")
     parser.add_argument("--list-models", action="store_true")
@@ -3193,6 +3255,10 @@ def main(argv: list[str] | None = None) -> int:
             settings.visual_review = False
         if args.trust_project_skills:
             settings.trust_project_skills = True
+        if args.trust_project_commands:
+            settings.trust_project_commands = True
+        if args.resource_profile:
+            settings.orchestra_resource_profile = args.resource_profile
         for name in ('model_timeout_seconds', 'model_retries', 'model_max_output_tokens', 'context_size'):
             value = getattr(args, name)
             if value is not None:

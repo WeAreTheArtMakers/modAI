@@ -34,5 +34,7 @@
   "model_max_output_tokens": 4096,
   "max_auto_skills": 2,
   "trust_project_skills": false,
-  "privacy_profile": "guarded"
+  "privacy_profile": "guarded",
+  "orchestra_resource_profile": "balanced",
+  "trust_project_commands": false
 }

@@ -93,6 +93,7 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         max_auto_skills: int = 2,
         trust_project_skills: bool = False,
         privacy_profile: str = "guarded",
+        allow_project_commands: bool = True,
         visual_review_enabled: bool = False,
         event: Callable[[HarnessEvent], None] | None = None,
     ) -> None:
@@ -108,13 +109,14 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         capabilities = Capabilities(
             read=True,
             write=write_allowed,
-            test=True,
+            test=allow_project_commands,
             network=network_enabled,
             delegate=delegate_enabled,
         )
         self.coding_tools = CodingTools(self.workspace, ToolPolicy(capabilities), run_dir / "logs",
                                         privacy_profile=privacy_profile)
         evidence = SharedEvidenceCache()
+        self.evidence = evidence
         delegate = (
             ReadOnlyDelegate(
                 delegate_runtime or runtime,
@@ -155,7 +157,9 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
             "cloud_input_tokens": 0,
             "cloud_output_tokens": 0,
         }
-        self.verifier = ProjectVerifier(self.workspace, task, self.coding_tools.bash, write_allowed)
+        self.verifier = ProjectVerifier(self.workspace, task, self.coding_tools.bash,
+                                        write_allowed, allow_project_commands)
+        self.allow_project_commands = allow_project_commands
         self.registry.verify = lambda: self._verify().as_dict()
         self.contract = infer_contract(task)
         self.reference_context = reference_context
@@ -191,6 +195,9 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         instructions = project_instructions(self.workspace)
         repo = project_snapshot(self.workspace)
         verification_hint = project_check_hint(self.workspace, (self.workspace / 'index.html').exists() or self.contract.static_site)
+        if not self.allow_project_commands:
+            verification_hint += ('\nPROJECT SCRIPT PERMISSION: project test/build scripts require explicit '
+                                  'trust_project_commands; do not call bash to bypass this boundary.')
         self._fast_bootstrap = bool(self.max_write_chars > MODEL_WRITE_MAX_CHARS
                                    and self.contract.static_site and not (self.workspace / 'index.html').exists())
         if self._fast_bootstrap:

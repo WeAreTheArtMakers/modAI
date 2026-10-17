@@ -60,12 +60,16 @@ class Settings:
     cloud_output_usd_per_million: float | None = None
     cloud_usd_limit: float | None = None
     cloud_billing_tier: str = "unknown"
+    orchestra_resource_profile: str = "balanced"
+    trust_project_commands: bool = False
 
     def validate(self) -> None:
         if self.privacy_profile not in PRIVACY_PROFILES:
             raise ValueError('privacy_profile must be guarded, strict or legacy')
         if self.cloud_billing_tier not in {'unknown', 'free', 'paid'}:
             raise ValueError('cloud_billing_tier must be unknown, free or paid')
+        if self.orchestra_resource_profile not in {'fast', 'balanced', 'extended'}:
+            raise ValueError('orchestra_resource_profile must be fast, balanced or extended')
         for name in ('cloud_input_usd_per_million', 'cloud_output_usd_per_million', 'cloud_usd_limit'):
             value = getattr(self, name)
             if value is not None and (type(value) not in (int, float) or not math.isfinite(value)
@@ -208,6 +212,8 @@ def load_settings(path: Path = DEFAULT_CONFIG) -> Settings:
         "MODAI_CLOUD_OUTPUT_USD_PER_MILLION": ("cloud_output_usd_per_million", float),
         "MODAI_CLOUD_USD_LIMIT": ("cloud_usd_limit", float),
         "MODAI_CLOUD_BILLING_TIER": ("cloud_billing_tier", str),
+        "MODAI_ORCHESTRA_RESOURCE_PROFILE": ("orchestra_resource_profile", str),
+        "MODAI_TRUST_PROJECT_COMMANDS": ("trust_project_commands", to_bool),
     }
     for env_name, (setting_name, convert) in env_map.items():
         value = os.getenv(env_name)
