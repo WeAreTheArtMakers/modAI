@@ -76,7 +76,7 @@ modai --full-orchestra "task"  # legacy 4.x planner/persona engine
 
 `orchestra` runs **Research → Code → Verify → Review → one optional repair → Final Verify**. Research has bounded read-only project/public-source tools; Code Virtuoso is the sole workspace writer in its existing persistent session. Verification uses current deterministic tests and browser gates without an extra model call. The independent local reviewer gets bounded excerpts of changed files and actual check results, with no tools. An invalid reviewer response gets at most one local retry; two invalid responses yield `needs_attention`, never an invented PASS. A blocking finding returns to the same coder for at most one review-driven repair cycle. `--full-orchestra` preserves the older 4.x planner/persona workflow.
 
-All MODAI-owned local generation in this staged path passes through one FIFO scheduler (concurrency **1**). This does not control other Ollama clients or guarantee that a model fits in memory. Research and review may make separate calls to the same selected model; no extra model is loaded or downloaded. `auto` still prefers `solo` for simple work.
+All MODAI-owned local generation in this staged path passes through one FIFO scheduler (concurrency **1**). This does not control other Ollama clients or guarantee that a model fits in memory. Research and review may make separate calls to the same selected model; no extra model is loaded or downloaded. The local reviewer requests non-streaming JSON Schema output when Ollama supports it, then validates file references and findings; unsupported formatting gets only one bounded plain-JSON fallback. `auto` still prefers `solo` for simple work.
 
 ## Coding tools
 
@@ -102,7 +102,7 @@ Full command output is written under the run’s `logs/` directory. The model se
 
 Every 5.x run has a `state.json` summary and an append-only `session.jsonl` transcript under `memory/runs/<RUN_ID>/`.
 
-Adaptive Orchestra additionally writes `tasks.sqlite3` in that run directory. The database stores six stable stage IDs, dependencies, role permissions, bounded summaries, artifact hashes and verification checkpoints; it does **not** copy complete conversations. `session.jsonl` remains authoritative, and the index can be rebuilt from completed stage records after an interruption. On resume, completed research and code stages are not blindly rerun. A changed output is reverified and rereviewed; a missing output yields `needs_attention`. Even a previously completed run rechecks the final gate against current files. Both transcript and index are private run data—protect the workspace and backups accordingly.
+Adaptive Orchestra additionally writes `tasks.sqlite3` in that run directory. The database stores six stable stage IDs, dependencies, role permissions, bounded summaries, artifact hashes and verification checkpoints; it does **not** copy complete conversations. `session.jsonl` remains authoritative, and the index can be rebuilt from completed stage records after an interruption. On resume, completed research and code stages are not blindly rerun. A changed output is reverified and rereviewed; a missing output yields `needs_attention`. When an explicitly referenced local README changes its supported acceptance requirements, the coder and reviewer receive the updated checklist. Even a previously completed run rechecks the final gate against current files. Both transcript and index are private run data—protect the workspace and backups accordingly.
 
 ```bash
 modai --list-runs
@@ -228,6 +228,8 @@ modai --version
 Profiles mainly affect the legacy orchestra. The 5.x harness deliberately avoids manufacturing more work for a simple task.
 
 ## Quality gates
+
+When a build task explicitly references a permitted local README.md, MODAI extracts a bounded acceptance checklist with the source of each supported requirement. For static pages, the separate requirement_coverage gate checks rendered DOM and mobile/desktop behavior: semantic landmarks, usable navigation targets, requested card count/layout, reachable CTA, embedded CSS, external asset restrictions and responsive overflow. A page that merely loads in Chromium cannot satisfy missing user-requested features. The checklist is task evidence, never executable README policy; unrelated minimal HTML tasks keep their existing gates. Visual design is reported as UNAVAILABLE unless a capable independent vision review actually runs. That status does not certify premium aesthetics or turn concrete requirement failures into PASS. For a human aesthetic check, inspect the optional mobile/landscape/tablet/desktop screenshots under the workspace's .modai/browser directory.
 
 ### 5.2 focused phases, direct verification and visual calibration
 

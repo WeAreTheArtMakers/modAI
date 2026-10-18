@@ -129,7 +129,10 @@ class LocalInferenceScheduler:
 
     def generate(self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *,
                  on_text: Any = None, max_output_tokens: int | None = None,
-                 _reduced_context: bool = False):
+                 _reduced_context: bool = False,
+                 response_format: dict[str, Any] | None = None,
+                 stream_override: bool | None = None,
+                 think_override: bool | None = None):
         owner = threading.get_ident()
         ticket = object()
         deadline = time.monotonic() + self.wait_timeout
@@ -174,6 +177,15 @@ class LocalInferenceScheduler:
             kwargs = {"on_text": on_text, "max_output_tokens": max_output_tokens}
             if self._reduced_context:
                 kwargs["_reduced_context"] = _reduced_context
+            try:
+                parameters = inspect.signature(self.runtime.generate).parameters
+            except (TypeError, ValueError):
+                parameters = {}
+            for key, value in (("response_format", response_format),
+                               ("stream_override", stream_override),
+                               ("think_override", think_override)):
+                if key in parameters and value is not None:
+                    kwargs[key] = value
             return self.runtime.generate(messages, tools, **kwargs)
         finally:
             with self._condition:

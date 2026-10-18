@@ -46,4 +46,7 @@ class ModelRuntime(Protocol):
         *,
         on_text: Any | None = None,
         max_output_tokens: int | None = None,
+        response_format: dict[str, Any] | None = None,
+        stream_override: bool | None = None,
+        think_override: bool | None = None,
     ) -> ModelResponse: ...

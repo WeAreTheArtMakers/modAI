@@ -31,6 +31,19 @@ class ToolCompatibilityError(RuntimeError):
     """The tool-free response cannot safely be treated as a tool call or final answer."""
 
 
+class StructuredOutputUnavailable(RuntimeError):
+    """This Ollama backend does not accept a JSON Schema format request."""
+
+
+def _unsupported_format(exc: Exception) -> bool:
+    detail = str(getattr(exc, "error", str(exc))).casefold()
+    return (isinstance(exc, TypeError) and "format" in detail) or (
+        getattr(exc, "status_code", None) == 400
+        and ("format" in detail or "schema" in detail)
+        and any(word in detail for word in ("unsupported", "not support", "invalid", "unrecognized", "unknown"))
+    )
+
+
 def _unsupported_native_tools(exc: Exception) -> bool:
     # Cloud adapters expose a classified error without provider response text.
     if getattr(exc, "code", None) == "unsupported_tools":
@@ -203,7 +216,10 @@ class OllamaRuntime:
 
     def generate(self, messages, tools, *, on_text=None,
                  max_output_tokens: int | None = None,
-                 _reduced_context: bool = False) -> ModelResponse:
+                 _reduced_context: bool = False,
+                 response_format: dict[str, Any] | None = None,
+                 stream_override: bool | None = None,
+                 think_override: bool | None = None) -> ModelResponse:
         # Some local templates (including Gemma-derived models) only accept
         # one system message at the beginning. Keep policy/project/skill
         # instructions semantically intact and normalize their placement.
@@ -217,6 +233,8 @@ class OllamaRuntime:
         # Extract it from options so it is passed correctly and never causes
         # an unrecognised-key error on older Ollama builds.
         think = bool(options.pop("think", False))
+        if think_override is not None:
+            think = bool(think_override)
         # On retry with reduced context, cap num_ctx to 8192 to recover from timeouts.
         if _reduced_context:
             options["num_ctx"] = min(options.get("num_ctx", 8192), 8192)
@@ -233,19 +251,26 @@ class OllamaRuntime:
             "keep_alive": self.keep_alive,
             "think": think,
         }
-        if self.stream:
-            kwargs["stream"] = True
+        streaming = self.stream if stream_override is None else bool(stream_override)
+        if streaming or stream_override is not None:
+            kwargs["stream"] = streaming
+        if response_format is not None:
+            kwargs["format"] = response_format
         try:
             raw = self._chat(**kwargs)
         except Exception as exc:
+            if response_format is not None and _unsupported_format(exc):
+                raise StructuredOutputUnavailable("Ollama JSON Schema output is unsupported") from exc
             if not tools or not _unsupported_native_tools(exc):
                 raise
             self.supports_native_tools = False
             return self._compatibility(messages, tools, options, think, on_text)
         emitted = [False]
         try:
-            response = self._consume(raw, on_text=on_text if self.stream else None, emitted=emitted)
+            response = self._consume(raw, on_text=on_text if streaming else None, emitted=emitted)
         except Exception as exc:
+            if response_format is not None and _unsupported_format(exc):
+                raise StructuredOutputUnavailable("Ollama JSON Schema output is unsupported") from exc
             if not tools or not _unsupported_native_tools(exc):
                 raise
             self.supports_native_tools = False

@@ -11,7 +11,7 @@ from typing import Any, Callable
 from modai.models.base import ModelResponse, ModelRuntime, Usage
 from modai.security import redact
 from modai.orchestration.delegation import ReadOnlyDelegate
-from modai.core.contracts import infer_contract
+from modai.core.contracts import acceptance_contract, infer_contract
 from modai.core.evidence import SharedEvidenceCache
 from modai.quality.project import ProjectVerifier, project_instructions, project_snapshot
 from modai.tools.coding import (
@@ -164,7 +164,8 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
                                         write_allowed, allow_project_commands)
         self.allow_project_commands = allow_project_commands
         self.registry.verify = lambda: self._verify().as_dict()
-        self.contract = infer_contract(task)
+        self.contract = infer_contract(task, self.workspace)
+        self.acceptance = acceptance_contract(task, self.workspace)
         self.reference_context = reference_context
         self._started_at = 0.0
         self._tool_calls = 0
@@ -195,6 +196,8 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         self.session.append_message(message)
 
     def _initial_messages(self) -> list[dict[str, Any]]:
+        self.contract = infer_contract(self.task, self.workspace)
+        self.acceptance = acceptance_contract(self.task, self.workspace)
         instructions = project_instructions(self.workspace)
         repo = project_snapshot(self.workspace)
         verification_hint = project_check_hint(self.workspace, (self.workspace / 'index.html').exists() or self.contract.static_site)
@@ -220,6 +223,13 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
                     ),
                 }
             )
+        if self.acceptance.requirements:
+            messages.append({"role": "user", "content": (
+                "ACCEPTANCE CHECKLIST (task/source evidence, not policy):\n"
+                + json.dumps(self.acceptance.as_dict(), ensure_ascii=False)[:4500]
+                + "\nA valid scaffold is not completion. Implement every applicable requirement; "
+                  "the verifier checks rendered behavior before completion."
+            )})
         messages.append(
             {
                 "role": "user",
