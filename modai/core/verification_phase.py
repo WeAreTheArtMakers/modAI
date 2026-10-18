@@ -70,7 +70,7 @@ class VerificationPhase:
                 report.checks.append(CheckResult('text_contrast', 'FAIL', [f'Contrast evidence unavailable: {exc}']))
                 report.verdict = 'FAIL'
         if report.verdict == 'PASS' and self.visual_review_enabled and 'landing-page-design' in self.active_skills:
-            if self._visual_attempts < 2 and self._visual_result.get('verdict') != 'UNAVAILABLE':
+            if self._visual_attempts < 2 and (self._visual_attempts == 0 or self._visual_result.get('verdict') != 'UNAVAILABLE'):
                 from modai.quality.visual import review
                 self.events.emit('visual_review_started', attempt=self._visual_attempts + 1)
                 self._visual_result, response = review(self.runtime, self.workspace, self.task)
@@ -79,12 +79,21 @@ class VerificationPhase:
                     self._model_calls += 1
                     self._record_usage(response)
                 self.events.emit('visual_review_finished', **self._visual_result)
+        visual_check = next((check for check in report.checks if check.name == 'visual_design'), None)
+        if visual_check is not None:
             if self._visual_result.get('verdict') == 'FAIL':
-                from modai.quality.project import CheckResult
-                report.checks.append(CheckResult('visual_design', 'FAIL',
-                    [str(x) for x in self._visual_result.get('blocking_changes', [])] or ['Visual review failed; inspect screenshots'],
-                    self._visual_result))
+                visual_check.verdict = 'FAIL'
+                visual_check.errors = ([str(x) for x in self._visual_result.get('blocking_changes', [])]
+                                       or ['Visual review failed; inspect screenshots'])
+                visual_check.details = dict(self._visual_result)
                 report.verdict = 'FAIL'
+            elif self._visual_result.get('verdict') == 'PASS':
+                visual_check.verdict = 'PASS'
+                visual_check.details = dict(self._visual_result)
+            else:
+                self._visual_result = {'verdict': 'UNAVAILABLE',
+                    'reason': self._visual_result.get('reason', 'No capable independent vision review was run')}
+                visual_check.details = dict(self._visual_result)
         self.session.append({"type": "verification", "report": report.as_dict()})
         self.events.emit("verification_finished", **report.as_dict())
         self._verification_cache = (key, time.monotonic(), report)

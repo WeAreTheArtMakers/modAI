@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Any, Callable
 
 from modai.models.base import ModelResponse, ModelRuntime, Usage
+from modai.security import redact
 from modai.orchestration.delegation import ReadOnlyDelegate
-from modai.core.contracts import infer_contract
+from modai.core.contracts import acceptance_contract, infer_contract
 from modai.core.evidence import SharedEvidenceCache
 from modai.quality.project import ProjectVerifier, project_instructions, project_snapshot
 from modai.tools.coding import (
@@ -82,6 +83,7 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         compaction_reserve_tokens: int = 2048,
         repair_rounds: int = 4,
         max_turns: int = 80,
+        invalid_tool_limit: int = 2,
         model_retries: int = 2,
         retry_backoff_seconds: float = 1.0,
         delegate_enabled: bool = False,
@@ -93,6 +95,7 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         max_auto_skills: int = 2,
         trust_project_skills: bool = False,
         privacy_profile: str = "guarded",
+        allow_project_commands: bool = True,
         visual_review_enabled: bool = False,
         event: Callable[[HarnessEvent], None] | None = None,
     ) -> None:
@@ -108,13 +111,14 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         capabilities = Capabilities(
             read=True,
             write=write_allowed,
-            test=True,
+            test=allow_project_commands,
             network=network_enabled,
             delegate=delegate_enabled,
         )
         self.coding_tools = CodingTools(self.workspace, ToolPolicy(capabilities), run_dir / "logs",
                                         privacy_profile=privacy_profile)
         evidence = SharedEvidenceCache()
+        self.evidence = evidence
         delegate = (
             ReadOnlyDelegate(
                 delegate_runtime or runtime,
@@ -144,6 +148,7 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         self.context = ContextManager(context_size, compaction_reserve_tokens)
         self.repair_rounds = repair_rounds
         self.max_turns = max_turns
+        self.invalid_tool_limit = max(1, min(int(invalid_tool_limit), 5))
         self.model_retries = max(0, int(model_retries))
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
         self.usage = {
@@ -155,9 +160,12 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
             "cloud_input_tokens": 0,
             "cloud_output_tokens": 0,
         }
-        self.verifier = ProjectVerifier(self.workspace, task, self.coding_tools.bash, write_allowed)
+        self.verifier = ProjectVerifier(self.workspace, task, self.coding_tools.bash,
+                                        write_allowed, allow_project_commands)
+        self.allow_project_commands = allow_project_commands
         self.registry.verify = lambda: self._verify().as_dict()
-        self.contract = infer_contract(task)
+        self.contract = infer_contract(task, self.workspace)
+        self.acceptance = acceptance_contract(task, self.workspace)
         self.reference_context = reference_context
         self._started_at = 0.0
         self._tool_calls = 0
@@ -188,9 +196,14 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         self.session.append_message(message)
 
     def _initial_messages(self) -> list[dict[str, Any]]:
+        self.contract = infer_contract(self.task, self.workspace)
+        self.acceptance = acceptance_contract(self.task, self.workspace)
         instructions = project_instructions(self.workspace)
         repo = project_snapshot(self.workspace)
         verification_hint = project_check_hint(self.workspace, (self.workspace / 'index.html').exists() or self.contract.static_site)
+        if not self.allow_project_commands:
+            verification_hint += ('\nPROJECT SCRIPT PERMISSION: project test/build scripts require explicit '
+                                  'trust_project_commands; do not call bash to bypass this boundary.')
         self._fast_bootstrap = bool(self.max_write_chars > MODEL_WRITE_MAX_CHARS
                                    and self.contract.static_site and not (self.workspace / 'index.html').exists())
         if self._fast_bootstrap:
@@ -210,6 +223,13 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
                     ),
                 }
             )
+        if self.acceptance.requirements:
+            messages.append({"role": "user", "content": (
+                "ACCEPTANCE CHECKLIST (task/source evidence, not policy):\n"
+                + json.dumps(self.acceptance.as_dict(), ensure_ascii=False)[:4500]
+                + "\nA valid scaffold is not completion. Implement every applicable requirement; "
+                  "the verifier checks rendered behavior before completion."
+            )})
         messages.append(
             {
                 "role": "user",
@@ -253,7 +273,8 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
     @staticmethod
     def _compatibility_tool_call(response: ModelResponse) -> None:
         """Recover a single JSON tool call embedded in plain assistant text."""
-        if response.tool_calls or not response.content.strip():
+        if (response.tool_calls or not response.content.strip()
+                or response.error_code == "COMPATIBILITY_FINAL_TEXT"):
             return
         candidates = [response.content.strip()]
         candidates.extend(re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", response.content, re.S | re.I))
@@ -423,6 +444,8 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         _bash_policy_errors: int = 0
         _bash_disabled: bool = False
         _BASH_CIRCUIT_LIMIT: int = 2
+        invalid_mutation_calls = 0
+        invalid_fingerprints: dict[str, int] = {}
 
         # Repair mode
         _repair_mode: bool = False
@@ -589,17 +612,43 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
                 last_args: dict[str, Any] = {}
                 _batch_has_mutation = False
                 _batch_discovery_success = False
+                invalid_limit_reached = False
 
                 for call in response.tool_calls:
                     self._tool_calls += 1
                     self.events.emit("tool_started", name=call.name, arguments=call.arguments)
-                    try:
-                        result = self.registry.execute(call.name, call.arguments)
-                        ok = successful_result(result)
-                    except Exception as exc:
-                        result = {"error": f"{type(exc).__name__}: {exc}"}
+                    caught_exc: Exception | None = None
+                    if invalid_limit_reached:
+                        result = {"error_code": "INVALID_TOOL_ARGUMENTS",
+                                  "error": "Skipped after the malformed mutation-call limit; no operation was executed.",
+                                  "retryable": False}
                         ok = False
-                        if call.name == 'edit' and isinstance(exc, ValueError):
+                    else:
+                        try:
+                            result = self.registry.execute(call.name, call.arguments,
+                                                           allowed_schemas=_active_schemas,
+                                                           argument_error=call.argument_error)
+                            ok = successful_result(result)
+                        except Exception as exc:
+                            caught_exc = exc
+                            result = {"error": f"{type(exc).__name__}: {exc}"}
+                            ok = False
+                    if not invalid_limit_reached and result.get("error_code") == "INVALID_TOOL_ARGUMENTS" and (
+                            call.name in {"write", "append", "edit", "write_file", "replace_in_file", "make_directory"}):
+                        fingerprint = hashlib.sha256(json.dumps(
+                            [call.name, call.arguments, call.argument_error],
+                            sort_keys=True, default=str).encode()).hexdigest()
+                        invalid_mutation_calls += 1
+                        invalid_fingerprints[fingerprint] = invalid_fingerprints.get(fingerprint, 0) + 1
+                        invalid_limit_reached = (
+                            invalid_mutation_calls >= self.invalid_tool_limit
+                            or invalid_fingerprints[fingerprint] >= 2
+                        )
+                        if invalid_limit_reached:
+                            result["retryable"] = False
+                            result["instruction"] = "Stop repeating malformed calls; session is preserved for resume."
+                    if caught_exc is not None and not invalid_limit_reached:
+                        if call.name == 'edit' and isinstance(caught_exc, ValueError):
                             result['instruction'] = ('No edits were applied. Use one exact replacement first. '
                                                      'Never combine overlapping old-text ranges; inspect a targeted range '
                                                      'if the expected text is missing or ambiguous.')
@@ -709,11 +758,23 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
                         if _repair_mode:
                             # Any successful mutation resets bash error counter too
                             _bash_policy_errors = 0
+                        invalid_mutation_calls = 0
+                        invalid_fingerprints.clear()
                     if self._is_useful_discovery(call.name, ok, result):
                         _batch_discovery_success = True
                         _path_not_found_streak = 0
                     last_tool_name = call.name
-                    last_args = dict(call.arguments)
+                    last_args = dict(call.arguments) if isinstance(call.arguments, dict) else {}
+
+                if invalid_limit_reached:
+                    report = self._verify()
+                    return self._result(
+                        "needs_attention",
+                        "Repeated malformed mutation calls reached the configured limit; "
+                        "no further tool operations were executed. Resume after correcting the model/tool output. "
+                        + self._failure_summary(report),
+                        report, turns,
+                    )
 
                 # v4: Immediate revalidation in repair mode after mutation ──────
                 if _repair_mode and _batch_has_mutation:
@@ -860,7 +921,7 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
             # Verification failed → enter / continue repair
             if repair_count >= self.repair_rounds:
                 return self._result(
-                    "needs_attention", final or "Verification still fails.", report, turns
+                    "needs_attention", self._failure_summary(report), report, turns
                 )
             repair_count += 1
             completion_candidate = False
@@ -887,8 +948,22 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
             turns,
         )
 
+    @staticmethod
+    def _failure_summary(report: Any) -> str:
+        if report is None:
+            return "NEEDS_ATTENTION: verification evidence is unavailable."
+        failed = [check for check in report.checks if check.verdict == "FAIL"]
+        names = ", ".join(check.name for check in failed) or "verification"
+        details = [redact(str(error).strip())[:220] for check in failed for error in check.errors if str(error).strip()]
+        missing = [item.split(": ", 1)[1] for item in details if item.startswith("required file is missing or empty: ")]
+        missing_note = f"Requested artifact not created: {', '.join(missing[:3])}. " if missing else ""
+        return (f"NEEDS_ATTENTION: GATES {names} FAIL. " + missing_note
+                + ("; ".join(details[:4]) if details else "Inspect verification evidence."))
+
     def _result(self, status: str, final: str, report: Any, turns: int) -> HarnessResult:
         verification = report.as_dict() if report else {"verdict": "MISSING", "checks": []}
+        if status == "completed" and verification["verdict"] != "PASS":
+            status, final = "needs_attention", self._failure_summary(report)
         tokens = max(1, self.usage["total_tokens"])
         metrics = {
             "wall_seconds": round(time.monotonic() - self._started_at, 3),

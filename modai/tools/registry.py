@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+from pathlib import Path, PureWindowsPath
 from typing import Any
 from modai.security import redact_data
 
@@ -23,6 +24,50 @@ SCHEMAS = [
     {"type": "function", "function": {"name": "web_search", "description": "Search the public web. Prefer primary sources and include URLs in the final evidence.", "parameters": {"type": "object", "properties": {"query": {"type": "string"}, "max_results": {"type": "integer"}}, "required": ["query"]}}},
     {"type": "function", "function": {"name": "fetch_url", "description": "Read one public HTTP(S) source with SSRF protections and bounded text.", "parameters": {"type": "object", "properties": {"url": {"type": "string"}, "max_chars": {"type": "integer"}}, "required": ["url"]}}},
 ]
+
+ALIASES = {"write_file": "write", "read_file": "read",
+           "list_files": "ls", "replace_in_file": "edit"}
+EXAMPLES = {
+    "write": {"path": "index.html", "content": "..."},
+    "append": {"path": "index.html", "content": "..."},
+    "edit": {"path": "index.html", "edits": [{"old": "before", "new": "after"}]},
+    "read": {"path": "README.md"},
+}
+
+
+def _argument_issues(value: Any, schema: dict[str, Any], prefix: str = "") -> tuple[list[str], list[str]]:
+    """Validate the advertised types/required fields without executing a tool."""
+    kind = schema.get("type")
+    if kind == "object":
+        if not isinstance(value, dict):
+            return [], [prefix or "arguments"]
+        properties = schema.get("properties", {})
+        missing = [prefix + key for key in schema.get("required", []) if key not in value]
+        invalid: list[str] = []
+        for key, item in value.items():
+            label = prefix + key
+            if key not in properties:
+                invalid.append(label)
+            else:
+                nested_missing, nested_invalid = _argument_issues(item, properties[key], label + ".")
+                missing.extend(nested_missing)
+                invalid.extend(nested_invalid)
+        return missing, invalid
+    if kind == "array":
+        if not isinstance(value, list):
+            return [], [prefix.rstrip(".")]
+        missing, invalid = [], []
+        for index, item in enumerate(value[:32]):
+            nested_missing, nested_invalid = _argument_issues(
+                item, schema.get("items", {}), f"{prefix}[{index}].")
+            missing.extend(nested_missing)
+            invalid.extend(nested_invalid)
+        if len(value) > 32:
+            invalid.append(prefix.rstrip("."))
+        return missing, invalid
+    valid = {"string": isinstance(value, str), "integer": type(value) is int,
+             "number": type(value) in {int, float}, "boolean": type(value) is bool}.get(kind, True)
+    return ([], [] if valid else [prefix.rstrip(".")])
 
 
 class ToolRegistry:
@@ -68,7 +113,80 @@ class ToolRegistry:
                 'parameters': {'type': 'object', 'properties': {}}}})
         return schemas
 
-    def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    def _validate_call(self, name: str, arguments: Any,
+                       allowed_schemas: list[dict[str, Any]] | None,
+                       argument_error: str | None) -> dict[str, Any] | None:
+        canonical = ALIASES.get(name, name)
+        available = {item["function"]["name"]: item["function"]
+                     for item in (allowed_schemas if allowed_schemas is not None else self.schemas())}
+        if (canonical == "make_directory" and allowed_schemas is None
+                and self.tools.policy.capabilities.write and "write" in available):
+            schema = {"parameters": {"type": "object", "properties": {"path": {"type": "string"}},
+                                     "required": ["path"]}}
+        else:
+            schema = available.get(canonical)
+        missing, invalid = [], []
+        if argument_error or not isinstance(arguments, dict):
+            invalid.append("arguments")
+        elif schema is None:
+            invalid.append("tool")
+        else:
+            missing, invalid = _argument_issues(arguments, schema.get("parameters", {}))
+            if canonical == "edit" and isinstance(arguments.get("edits"), list) and not arguments["edits"]:
+                invalid.append("edits")
+            if canonical == "edit" and isinstance(arguments.get("edits"), list):
+                for index, item in enumerate(arguments["edits"][:32]):
+                    if isinstance(item, dict) and isinstance(item.get("old"), str) and not item["old"]:
+                        invalid.append(f"edits[{index}].old")
+            if canonical in {"bash", "git"} and isinstance(arguments.get("argv"), list) and not arguments["argv"]:
+                invalid.append("argv")
+            if "path" in arguments and isinstance(arguments["path"], str):
+                path = arguments["path"]
+                unsafe = (not path.strip() or "\x00" in path or Path(path).is_absolute()
+                          or PureWindowsPath(path).is_absolute() or ".." in Path(path).parts
+                          or (canonical in {"write", "append", "edit", "make_directory"}
+                              and path in {".", "./"}))
+                if not unsafe:
+                    try:
+                        self.tools._path(path)
+                    except (PermissionError, ValueError, OSError):
+                        unsafe = True
+                if unsafe:
+                    invalid.append("path")
+        if not missing and not invalid:
+            return None
+        # Preserve direct-call permission semantics for existing callers; model
+        # calls receive a bounded diagnostic with no private path values.
+        if allowed_schemas is None and "path" in invalid:
+            raise PermissionError("invalid or disallowed workspace-relative path")
+        return {
+            "error_code": "INVALID_TOOL_ARGUMENTS",
+            "error": "Arguments do not match the granted tool schema; no operation was executed.",
+            "tool": canonical if canonical in available or schema is not None else "<unavailable>",
+            "missing_required": sorted(set(missing))[:8],
+            "invalid_fields": sorted(set(invalid))[:8],
+            "retryable": bool(schema is not None and "path" not in invalid and "tool" not in invalid),
+            "example": EXAMPLES.get(canonical, {}),
+        }
+
+    def execute(self, name: str, arguments: dict[str, Any], *,
+                allowed_schemas: list[dict[str, Any]] | None = None,
+                argument_error: str | None = None) -> dict[str, Any]:
+        if name == "verify" and (not self.tools.policy.capabilities.test or not callable(self.verify)):
+            raise PermissionError("verification capability unavailable")
+        if name == "make_directory" and not self.tools.policy.capabilities.write:
+            raise PermissionError("tool capability denied: make_directory")
+        canonical = ALIASES.get(name, name)
+        if canonical not in {"verify", "load_skill", "make_directory"} and not self.tools.policy.allows(canonical):
+            raise PermissionError(f"tool capability denied: {canonical}")
+        if name == "replace_in_file" and isinstance(arguments, dict):
+            arguments = {"path": arguments.get("path", ""), "edits": [{
+                "old": arguments.get("old_text", arguments.get("old", "")),
+                "new": arguments.get("new_text", arguments.get("new", "")),
+            }]}
+        diagnostic = self._validate_call(name, arguments, allowed_schemas, argument_error)
+        if diagnostic is not None:
+            return diagnostic
         if name == 'verify':
             if not self.tools.policy.capabilities.test or not callable(self.verify):
                 raise PermissionError('verification capability unavailable')
@@ -87,22 +205,9 @@ class ToolRegistry:
             return self.load_skill(**arguments)
         # Accept persisted 4.x tool calls during session migration; new schemas
         # advertise only the compact 5.x names.
-        if name == "write_file":
-            name = "write"
-        elif name == "read_file":
-            name = "read"
-        elif name == "list_files":
-            name = "ls"
-        elif name == "make_directory":
-            if not self.tools.policy.capabilities.write:
-                raise PermissionError("tool capability denied: make_directory")
+        if name == "make_directory":
             return self.tools.make_directory(**arguments)
-        elif name == "replace_in_file":
-            name = "edit"
-            arguments = {"path": arguments.get("path", ""), "edits": [{
-                "old": arguments.get("old_text", arguments.get("old", "")),
-                "new": arguments.get("new_text", arguments.get("new", "")),
-            }]}
+        name = canonical
         if not self.tools.policy.allows(name):
             raise PermissionError(f"tool capability denied: {name}")
         # v4.1.3 model-tool boundary: a fully parsed write/append whose

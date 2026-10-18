@@ -14,7 +14,7 @@
 
 MODAI turns a local Ollama model into a practical coding harness that inspects the real project, edits files atomically, runs deterministic quality gates, repairs current failures in the same session, and resumes from an append-only transcript. It is designed for Apple Silicon laptops, stays local by default, and keeps the older multi-agent orchestra behind an explicit compatibility mode.
 
-Version 5.0 replaces persona-heavy planning for ordinary software tasks with a persistent **Code Virtuoso** session. The useful musical metaphor remains in the interface; progress is now measured by artifacts, passing gates, and verified fixes—not by how many agents spoke.
+Version 5.3 keeps ordinary software tasks on the persistent **Code Virtuoso** path. Explicit Adaptive Orchestra adds useful read-only research and review around that same writer. Progress is measured by artifacts, passing gates, and verified fixes—not by how many agents spoke.
 
 [Product site](https://wearetheartmakers.github.io/modAI/) · [We Are The Art Makers](https://wearetheartmakers.com) · [Architecture](docs/HARNESS_ARCHITECTURE.md) · [4.x migration](docs/MIGRATION_FROM_ORCHESTRATOR.md)
 
@@ -70,11 +70,13 @@ There is no planner call or debate round on the normal software path. If a model
 ```bash
 modai --mode auto "task"       # default; strongly favors the solo coder
 modai --mode solo "task"       # always one persistent coding session
-modai --mode orchestra "task"  # enables bounded read-only delegation
+modai --mode orchestra "task"  # staged Adaptive Orchestra
 modai --full-orchestra "task"  # legacy 4.x planner/persona engine
 ```
 
-`orchestra` does not give every specialist write access. The main Code Virtuoso is the mutator. Delegates are bounded and read-only. `--full-orchestra` exists for saved workflows that deliberately depend on the older plan/debate/reviewer sequence.
+`orchestra` runs **Research → Code → Verify → Review → one optional repair → Final Verify**. Research has bounded read-only project/public-source tools; Code Virtuoso is the sole workspace writer in its existing persistent session. Verification uses current deterministic tests and browser gates without an extra model call. The independent local reviewer gets bounded excerpts of changed files and actual check results, with no tools. An invalid reviewer response gets at most one local retry; two invalid responses yield `needs_attention`, never an invented PASS. A blocking finding returns to the same coder for at most one review-driven repair cycle. `--full-orchestra` preserves the older 4.x planner/persona workflow.
+
+All MODAI-owned local generation in this staged path passes through one FIFO scheduler (concurrency **1**). This does not control other Ollama clients or guarantee that a model fits in memory. Research and review may make separate calls to the same selected model; no extra model is loaded or downloaded. The local reviewer requests non-streaming JSON Schema output when Ollama supports it, then validates file references and findings; unsupported formatting gets only one bounded plain-JSON fallback. `auto` still prefers `solo` for simple work.
 
 ## Coding tools
 
@@ -99,6 +101,8 @@ Full command output is written under the run’s `logs/` directory. The model se
 ## Sessions and control
 
 Every 5.x run has a `state.json` summary and an append-only `session.jsonl` transcript under `memory/runs/<RUN_ID>/`.
+
+Adaptive Orchestra additionally writes `tasks.sqlite3` in that run directory. The database stores six stable stage IDs, dependencies, role permissions, bounded summaries, artifact hashes and verification checkpoints; it does **not** copy complete conversations. `session.jsonl` remains authoritative, and the index can be rebuilt from completed stage records after an interruption. On resume, completed research and code stages are not blindly rerun. A changed output is reverified and rereviewed; a missing output yields `needs_attention`. When an explicitly referenced local README changes its supported acceptance requirements, the coder and reviewer receive the updated checklist. Even a previously completed run rechecks the final gate against current files. Both transcript and index are private run data—protect the workspace and backups accordingly.
 
 ```bash
 modai --list-runs
@@ -149,10 +153,23 @@ For an M1 Pro with 16 GB unified memory, begin with the project’s recommended 
 modai --mode auto "TASK"
 modai --mode solo "TASK"
 modai --mode orchestra "TASK"
+modai --mode orchestra --resource-profile fast "TASK"
+modai --mode orchestra --resource-profile balanced --num-ctx 16384 "TASK"
+modai --mode orchestra --resource-profile extended "TASK"
+modai --mode orchestra --trust-project-commands "TASK"
 modai --repair-rounds 4 "TASK"
+modai --invalid-tool-limit 2 "TASK"   # stop after repeated malformed mutation calls (1-5)
 modai --max-tool-rounds 12 "TASK"       # legacy compatibility setting
 modai --max-hours 24 "TASK"             # legacy engine active-time guard
 ```
+
+Run these commands **inside your real project directory**, or add `--workspace "$PWD"` there. Paths such as `/path/to/project` in examples are placeholders, not directories MODAI creates for you. An explicit `--workspace` must already exist; an invalid path produces a short error without a Python traceback.
+
+Malformed native tool arguments receive a bounded schema diagnostic; repeated invalid file mutations stop with `NEEDS_ATTENTION` and preserve the checkpoint. A noninteractive failed run exits nonzero. Model-written claims of success never override deterministic artifact and quality gates.
+
+Adaptive Orchestra defaults to `balanced`: context stays at 8192 unless measured memory headroom supports the requested 16384. `fast` caps at 8192. `extended` may allow up to 32768 only with at least 24 GB total memory and measured headroom; it will **not** activate a larger context on an M1 Pro 16 GB. These are conservative context targets, not measured KV-cache allocations. When telemetry is unavailable MODAI stays at 8192. On macOS it pauses before a new model call below 12% reported free memory, or below 25% with at least 64 recent swap-out pages per second. Allocated swap alone is reported but does not trigger a pause. The TUI orchestration profile also exposes these settings.
+
+In staged mode, discovered project test/build scripts are **not** run by default; that is a truthful failed verification gate, not a skipped PASS. Review scripts in a trusted workspace before enabling `--trust-project-commands` or `MODAI_TRUST_PROJECT_COMMANDS=true`. This permission flag is not OS isolation: use a separate account/container for untrusted code. SOLO/AUTO keep their pre-5.3 project-command behavior for compatibility.
 
 ### Network and cloud
 
@@ -161,7 +178,7 @@ modai --no-internet "TASK"
 modai --allow-cloud "Public research task"
 ```
 
-Cloud is off by default. Configure OpenAI, Anthropic, Google, or Groq interactively with `/cloud setup`, then opt in per task with `--allow-cloud` or `/hybrid TASK`. In orchestra mode, only the bounded read-only delegate can use that cloud runtime; the persistent writer remains local. Internet must also be enabled. Groq uses its OpenAI-compatible chat-completions API; set `GROQ_API_KEY` in the environment or use the macOS Keychain setup. No provider is a paid fallback for a local failure. Prompts containing obvious secrets disable cloud routing. The cloud token budget is a paid-provider cost guard only:
+Cloud is off by default. Configure OpenAI, Anthropic, Google, or Groq interactively with `/cloud setup`, then opt in per task with `--allow-cloud` or `/hybrid TASK`. In orchestra mode, only the bounded read-only research delegate can use that cloud runtime; the coder and reviewer remain local. Internet must also be enabled. Cloud research receives the original user task and public-web-only tools, not project-file excerpts. Only opt in when that original task is safe to send. Groq uses its OpenAI-compatible chat-completions API; set `GROQ_API_KEY` in the environment or use the macOS Keychain setup. No provider is a paid fallback for a local failure. Prompts containing obvious secrets disable cloud routing. The cloud token budget is a paid-provider cost guard only:
 
 ```bash
 modai --cloud-token-budget 1000000 --allow-cloud "TASK"
@@ -172,6 +189,8 @@ Local Ollama usage has no token ceiling. When a cloud budget is reached, MODAI a
 Privacy profiles: `MODAI_PRIVACY_PROFILE=guarded` is the default and blocks common credential files (including `.env`, private keys, and cloud credential folders) in model-facing file tools. `strict` blocks additional hidden and secret-named paths. `legacy` is an explicit compatibility override. Direct user-controlled file operations are distinct from model tool calls. Auxiliary command logs are scrubbed and run/session files are private (`0700` directories, `0600` files on POSIX); canonical session transcripts retain content so resume works. Keep run directories private and encrypted at rest if necessary.
 
 These controls are **not an OS sandbox**: model-initiated project scripts/tests may still read files or environment variables under your user account. Use a separate OS account/container and a sanitized workspace for untrusted repositories. A user prompt can itself contain private context; only opt into cloud for a public research task. Cloud delegates get the original task rather than model-authored file excerpts, and their tools are restricted to public web research. Cloud main-coder access remains disabled pending a separate data-scope permission design.
+
+The new `ToolGateway` is a deny-by-default capability/approval boundary for future MCP adapters and has a mocked read-only test. It does **not** start external servers, implement MCP transport, or grant third-party account mutations in this release.
 
 Optional `cloud_billing_tier` (`unknown`, `free`, `paid`) records your account classification; it is not inferred from provider name. `cloud_input_usd_per_million` and `cloud_output_usd_per_million` are separate user-supplied rates. Without both, estimated USD cost is **unknown**, never zero. `cloud_usd_limit` requires both prices; the current guard pauses after the recorded request reaches the limit, so one in-flight request can exceed it. Token budgets remain the primary bound. Rate limits are surfaced with a safe error category and `Retry-After` when available; MODAI does not automatically retry paid requests.
 
@@ -209,6 +228,8 @@ modai --version
 Profiles mainly affect the legacy orchestra. The 5.x harness deliberately avoids manufacturing more work for a simple task.
 
 ## Quality gates
+
+When a build task explicitly references a permitted local README.md, MODAI extracts a bounded acceptance checklist with the source of each supported requirement. For static pages, the separate requirement_coverage gate checks rendered DOM and mobile/desktop behavior: semantic landmarks, usable navigation targets, requested card count/layout, reachable CTA, embedded CSS, external asset restrictions and responsive overflow. A page that merely loads in Chromium cannot satisfy missing user-requested features. The checklist is task evidence, never executable README policy; unrelated minimal HTML tasks keep their existing gates. Visual design is reported as UNAVAILABLE unless a capable independent vision review actually runs. That status does not certify premium aesthetics or turn concrete requirement failures into PASS. For a human aesthetic check, inspect the optional mobile/landscape/tablet/desktop screenshots under the workspace's .modai/browser directory.
 
 ### 5.2 focused phases, direct verification and visual calibration
 
@@ -280,7 +301,7 @@ For static sites it also runs:
 - horizontal overflow, visible content, broken anchors/local navigation, console errors, runtime exceptions, and menu-toggle checks;
 - screenshots under the target site’s `.modai/browser/` directory.
 
-For detected Python and Node projects it runs available pytest and package scripts (`test`, `lint`, `build`) with bounded logs. A failed gate is injected back into the same coding conversation as exact current evidence.
+For detected Python and Node projects, SOLO/AUTO run available pytest and package scripts (`test`, `lint`, `build`) with bounded logs. In Adaptive Orchestra these scripts require `--trust-project-commands` after inspection; otherwise verification reports an explicit failure. A failed gate is injected back into the same coding conversation as exact current evidence.
 
 ## Privacy and permissions
 
@@ -305,6 +326,8 @@ Review changes before committing them. MODAI intentionally does not commit or pu
   "context_size": 8192,
   "temperature": 0.25,
   "harness_mode": "auto",
+  "orchestra_resource_profile": "balanced",
+  "trust_project_commands": false,
   "harness_max_turns": 80,
   "compaction_reserve_tokens": 2048,
   "repair_rounds": 4,
@@ -322,7 +345,9 @@ Older keys remain readable. `max_total_tokens` is retained as the storage/CLI co
 .venv/bin/python -m pytest -q
 ```
 
-The deterministic suite uses a scripted fake runtime and covers the persistent loop, native tools, atomic edits, truncated responses, no-progress recovery, resume, compaction, queues, permissions, routing, latest validation evidence, a real landing-page browser E2E fixture, a repair fixture, and legacy orchestra regression.
+The deterministic suite uses a scripted fake runtime and covers the persistent loop, native tools, atomic edits, truncated responses, no-progress recovery, resume, compaction, queues, permissions, routing, latest validation evidence, a real landing-page browser E2E fixture, a repair fixture, and legacy orchestra regression. Version 5.3 adds staged-orchestra, one-writer, read-only review, JSONL index recovery, scheduler pressure/FIFO, mocked gateway and Chromium fixture tests. A short real-model smoke proves local Ollama transport and scheduling only; it is not a guarantee that every model/task will finish on 16 GB.
+
+Pull requests run the same Python regression suite on GitHub Actions with Chromium installed. The workflow is a separate CI environment, not an Ollama or Apple Silicon benchmark; check the PR status before treating it as passed.
 
 Run the optional local-model benchmark:
 

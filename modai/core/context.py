@@ -17,11 +17,21 @@ class ContextManager:
         return estimated_tokens(messages) > self.max_tokens - self.reserve_tokens
 
     def compact(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Deterministically retain objective, latest summary, and complete tool pairs."""
+        """Retain policy, task/criteria and recent errors; token counts are estimates."""
         system = [item for item in messages if item.get("role") == "system"
                   and not str(item.get('content', '')).startswith('Earlier transcript was compacted.')]
-        objective = [item for item in messages if item.get("role") == "user"][:1]
+        original_objective = [item for item in messages if item.get("role") == "user"][:1]
+        objective = original_objective
+        if objective and "\n\nCURRENT PROJECT TREE\n" in str(objective[0].get("content", "")):
+            # The snapshot is disk-derived and quickly stale. Keep the user's
+            # objective/criteria, not a duplicate repository listing.
+            objective = [{**objective[0], "content": str(objective[0]["content"]).split(
+                "\n\nCURRENT PROJECT TREE\n", 1)[0] +
+                "\n\nProject tree omitted during compaction; inspect targeted files if needed."}]
         tail = messages[-12:]
+        recent_error = next((item for item in reversed(messages[:-12])
+                             if item.get("role") == "user" and any(marker in str(item.get("content", ""))
+                             for marker in ("VALIDATION FAILED", "REVIEW FINDINGS", "CHECKPOINT FAILED"))), None)
         # Never retain an orphan tool result or an assistant tool call without its result.
         call_ids = {str(call.get("id")) for item in tail for call in item.get("tool_calls", [])
                     if isinstance(call, dict)}
@@ -43,7 +53,7 @@ class ContextManager:
         )}
         # Keep system policy, project context and skill bodies. Evict a tool
         # call and ALL of its results together, never individual messages.
-        clean = [m for m in clean if m not in system and m not in objective]
+        clean = [m for m in clean if m not in system and m not in original_objective]
         groups: list[list[dict[str, Any]]] = []
         for item in clean:
             if item.get('role') == 'tool' and groups and groups[-1][0].get('tool_calls'):
@@ -51,6 +61,8 @@ class ContextManager:
             else:
                 groups.append([item])
         fixed = system + objective + [summary]
+        if recent_error is not None:
+            fixed.append({**recent_error, "content": str(recent_error.get("content", ""))[:2400]})
         while groups and estimated_tokens(fixed + [m for g in groups for m in g]) > self.max_tokens - self.reserve_tokens:
             if len(groups) == 1 and groups[0][0].get('role') == 'user':
                 groups[0][0] = {**groups[0][0], 'content': str(groups[0][0].get('content', ''))[:2400]}

@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
-from modai.core.contracts import infer_contract
+from modai.core.contracts import acceptance_contract, infer_contract
 from .test_plan import discover_commands
 
 
@@ -77,15 +77,21 @@ def project_instructions(workspace: Path) -> str:
 
 class ProjectVerifier:
     def __init__(self, workspace: Path, task: str, command_runner: Callable[[list[str], int], dict[str, Any]],
-                 write_allowed: bool = True) -> None:
+                 write_allowed: bool = True, allow_project_commands: bool = True) -> None:
         self.workspace = workspace
         self.task = task
         self.command_runner = command_runner
         self.write_allowed = write_allowed
+        self.allow_project_commands = allow_project_commands
         self.sequence = 0
 
     def _command_checks(self) -> list[CheckResult]:
         commands = discover_commands(self.workspace)
+        if commands and not self.allow_project_commands:
+            return [CheckResult("project_commands", "FAIL", [
+                "Project scripts/tests were not executed. Explicitly enable trust_project_commands "
+                "for this workspace after reviewing them."
+            ], {"discovered": [name for name, _ in commands[:4]]})]
         results: list[CheckResult] = []
         for name, command in commands[:4]:
             try:
@@ -101,7 +107,8 @@ class ProjectVerifier:
 
     def verify(self, changed_paths: list[str]) -> VerificationReport:
         self.sequence += 1
-        contract = infer_contract(self.task)
+        contract = infer_contract(self.task, self.workspace)
+        acceptance = acceptance_contract(self.task, self.workspace)
         missing = [path for path in contract.files if not (self.workspace / path).is_file()
                    or (self.workspace / path).stat().st_size == 0]
         checks = [CheckResult("artifact_contract", "FAIL" if missing else "PASS",
@@ -132,7 +139,21 @@ class ProjectVerifier:
                 except Exception as exc:
                     verdict, payload, errors = "FAIL", {}, [f"{type(exc).__name__}: {exc}"]
                 checks.append(CheckResult(name, verdict, errors, payload))
-        verdict = "PASS" if checks and all(item.verdict == "PASS" for item in checks) else "FAIL"
+        # A bare "responsive/index.html" request already has the historical
+        # browser/asset gates. Add this narrower gate when concrete feature
+        # requirements or an explicit local acceptance source exist.
+        targeted = any(item.source == "README.md" or item.id not in {"responsive", "index_html"}
+                       for item in acceptance.requirements)
+        if targeted and contract.static_site:
+            from .requirements import evaluate_requirements
+            coverage = evaluate_requirements(self.workspace, acceptance)
+            checks.append(CheckResult("requirement_coverage", coverage["verdict"],
+                                      coverage["errors"], coverage))
+            checks.append(CheckResult("visual_design", "UNAVAILABLE", [], {
+                "reason": "No independent screenshot aesthetics review has been performed; browser runtime is not visual-design certification"
+            }))
+        verdict = "PASS" if checks and all(item.verdict == "PASS" or
+            (item.name == "visual_design" and item.verdict == "UNAVAILABLE") for item in checks) else "FAIL"
         if not checks:
             if not self.write_allowed or not requires_artifact_change(self.task):
                 checks.append(CheckResult("read_only_analysis", "PASS"))
