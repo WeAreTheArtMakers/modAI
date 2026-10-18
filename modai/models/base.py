@@ -9,6 +9,7 @@ class ToolCall:
     id: str
     name: str
     arguments: dict[str, Any]
+    argument_error: str | None = None
 
 
 @dataclass(slots=True)

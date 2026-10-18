@@ -15,16 +15,16 @@ def _value(value: Any, name: str, default: Any = None) -> Any:
     return getattr(value, name, default)
 
 
-def _arguments(value: Any) -> dict[str, Any]:
+def _arguments(value: Any) -> tuple[dict[str, Any], str | None]:
     if isinstance(value, Mapping):
-        return dict(value)
+        return dict(value), None
     if isinstance(value, str):
         try:
             parsed = json.loads(value)
-            return parsed if isinstance(parsed, dict) else {}
+            return (parsed, None) if isinstance(parsed, dict) else ({}, "not_object")
         except json.JSONDecodeError:
-            return {}
-    return {}
+            return {}, "malformed_json"
+    return {}, "not_object"
 
 
 class ToolCompatibilityError(RuntimeError):
@@ -184,10 +184,11 @@ class OllamaRuntime:
         calls: list[ToolCall] = []
         for raw_call in _value(message, "tool_calls", []) or []:
             fn = _value(raw_call, "function", {}) or {}
+            arguments, argument_error = _arguments(_value(fn, "arguments", {}))
             calls.append(ToolCall(
                 str(_value(raw_call, "id", "") or uuid.uuid4().hex),
                 str(_value(fn, "name", "")),
-                _arguments(_value(fn, "arguments", {})),
+                arguments, argument_error,
             ))
         reason = str(_value(raw, "done_reason", _value(raw, "stop_reason", "stop")) or "stop")
         return ModelResponse(
@@ -268,6 +269,10 @@ class OllamaRuntime:
                 )
             content = response.content.strip()
             if response.tool_calls:
+                if any(call.argument_error for call in response.tool_calls):
+                    raise ToolCompatibilityError(
+                        "Native tool arguments were malformed in compatibility mode; no tool was executed."
+                    )
                 value = {"tool": response.tool_calls[0].name,
                          "args": response.tool_calls[0].arguments}
                 if len(response.tool_calls) != 1:

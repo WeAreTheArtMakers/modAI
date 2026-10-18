@@ -142,7 +142,9 @@ class BootstrapPhase:
             self.events.emit("tool_started", name=call.name, arguments=call.arguments,
                              rescue=True)
             try:
-                result = self.registry.execute(call.name, call.arguments)
+                result = self.registry.execute(call.name, call.arguments,
+                                               allowed_schemas=[schema],
+                                               argument_error=call.argument_error)
             except Exception as exc:
                 result = {"error": f"{type(exc).__name__}: {exc}"}
             assistant = self._assistant_message(response)

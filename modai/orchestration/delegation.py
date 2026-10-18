@@ -81,7 +81,9 @@ class ReadOnlyDelegate:
                 try:
                     if call.name not in {s['function']['name'] for s in schemas}:
                         raise PermissionError('Delegate called a tool outside granted schemas')
-                    result = self.registry.execute(call.name, call.arguments)
+                    result = self.registry.execute(call.name, call.arguments,
+                                                   allowed_schemas=schemas,
+                                                   argument_error=call.argument_error)
                     if isinstance(result, dict) and not result.get('error'):
                         if call.name == 'read':
                             path = self.registry.tools._path(str(call.arguments.get('path', '')), must_exist=True)

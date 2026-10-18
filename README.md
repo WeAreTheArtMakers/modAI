@@ -158,11 +158,14 @@ modai --mode orchestra --resource-profile balanced --num-ctx 16384 "TASK"
 modai --mode orchestra --resource-profile extended "TASK"
 modai --mode orchestra --trust-project-commands "TASK"
 modai --repair-rounds 4 "TASK"
+modai --invalid-tool-limit 2 "TASK"   # stop after repeated malformed mutation calls (1-5)
 modai --max-tool-rounds 12 "TASK"       # legacy compatibility setting
 modai --max-hours 24 "TASK"             # legacy engine active-time guard
 ```
 
 Run these commands **inside your real project directory**, or add `--workspace "$PWD"` there. Paths such as `/path/to/project` in examples are placeholders, not directories MODAI creates for you. An explicit `--workspace` must already exist; an invalid path produces a short error without a Python traceback.
+
+Malformed native tool arguments receive a bounded schema diagnostic; repeated invalid file mutations stop with `NEEDS_ATTENTION` and preserve the checkpoint. A noninteractive failed run exits nonzero. Model-written claims of success never override deterministic artifact and quality gates.
 
 Adaptive Orchestra defaults to `balanced`: context stays at 8192 unless measured memory headroom supports the requested 16384. `fast` caps at 8192. `extended` may allow up to 32768 only with at least 24 GB total memory and measured headroom; it will **not** activate a larger context on an M1 Pro 16 GB. These are conservative context targets, not measured KV-cache allocations. When telemetry is unavailable MODAI stays at 8192. On macOS it pauses before a new model call below 12% reported free memory, or below 25% with at least 64 recent swap-out pages per second. Allocated swap alone is reported but does not trigger a pause. The TUI orchestration profile also exposes these settings.
 

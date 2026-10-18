@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from modai.models.base import ModelResponse, ModelRuntime, Usage
+from modai.security import redact
 from modai.orchestration.delegation import ReadOnlyDelegate
 from modai.core.contracts import infer_contract
 from modai.core.evidence import SharedEvidenceCache
@@ -82,6 +83,7 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         compaction_reserve_tokens: int = 2048,
         repair_rounds: int = 4,
         max_turns: int = 80,
+        invalid_tool_limit: int = 2,
         model_retries: int = 2,
         retry_backoff_seconds: float = 1.0,
         delegate_enabled: bool = False,
@@ -146,6 +148,7 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         self.context = ContextManager(context_size, compaction_reserve_tokens)
         self.repair_rounds = repair_rounds
         self.max_turns = max_turns
+        self.invalid_tool_limit = max(1, min(int(invalid_tool_limit), 5))
         self.model_retries = max(0, int(model_retries))
         self.retry_backoff_seconds = max(0.0, float(retry_backoff_seconds))
         self.usage = {
@@ -431,6 +434,8 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
         _bash_policy_errors: int = 0
         _bash_disabled: bool = False
         _BASH_CIRCUIT_LIMIT: int = 2
+        invalid_mutation_calls = 0
+        invalid_fingerprints: dict[str, int] = {}
 
         # Repair mode
         _repair_mode: bool = False
@@ -597,17 +602,43 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
                 last_args: dict[str, Any] = {}
                 _batch_has_mutation = False
                 _batch_discovery_success = False
+                invalid_limit_reached = False
 
                 for call in response.tool_calls:
                     self._tool_calls += 1
                     self.events.emit("tool_started", name=call.name, arguments=call.arguments)
-                    try:
-                        result = self.registry.execute(call.name, call.arguments)
-                        ok = successful_result(result)
-                    except Exception as exc:
-                        result = {"error": f"{type(exc).__name__}: {exc}"}
+                    caught_exc: Exception | None = None
+                    if invalid_limit_reached:
+                        result = {"error_code": "INVALID_TOOL_ARGUMENTS",
+                                  "error": "Skipped after the malformed mutation-call limit; no operation was executed.",
+                                  "retryable": False}
                         ok = False
-                        if call.name == 'edit' and isinstance(exc, ValueError):
+                    else:
+                        try:
+                            result = self.registry.execute(call.name, call.arguments,
+                                                           allowed_schemas=_active_schemas,
+                                                           argument_error=call.argument_error)
+                            ok = successful_result(result)
+                        except Exception as exc:
+                            caught_exc = exc
+                            result = {"error": f"{type(exc).__name__}: {exc}"}
+                            ok = False
+                    if not invalid_limit_reached and result.get("error_code") == "INVALID_TOOL_ARGUMENTS" and (
+                            call.name in {"write", "append", "edit", "write_file", "replace_in_file", "make_directory"}):
+                        fingerprint = hashlib.sha256(json.dumps(
+                            [call.name, call.arguments, call.argument_error],
+                            sort_keys=True, default=str).encode()).hexdigest()
+                        invalid_mutation_calls += 1
+                        invalid_fingerprints[fingerprint] = invalid_fingerprints.get(fingerprint, 0) + 1
+                        invalid_limit_reached = (
+                            invalid_mutation_calls >= self.invalid_tool_limit
+                            or invalid_fingerprints[fingerprint] >= 2
+                        )
+                        if invalid_limit_reached:
+                            result["retryable"] = False
+                            result["instruction"] = "Stop repeating malformed calls; session is preserved for resume."
+                    if caught_exc is not None and not invalid_limit_reached:
+                        if call.name == 'edit' and isinstance(caught_exc, ValueError):
                             result['instruction'] = ('No edits were applied. Use one exact replacement first. '
                                                      'Never combine overlapping old-text ranges; inspect a targeted range '
                                                      'if the expected text is missing or ambiguous.')
@@ -717,11 +748,23 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
                         if _repair_mode:
                             # Any successful mutation resets bash error counter too
                             _bash_policy_errors = 0
+                        invalid_mutation_calls = 0
+                        invalid_fingerprints.clear()
                     if self._is_useful_discovery(call.name, ok, result):
                         _batch_discovery_success = True
                         _path_not_found_streak = 0
                     last_tool_name = call.name
-                    last_args = dict(call.arguments)
+                    last_args = dict(call.arguments) if isinstance(call.arguments, dict) else {}
+
+                if invalid_limit_reached:
+                    report = self._verify()
+                    return self._result(
+                        "needs_attention",
+                        "Repeated malformed mutation calls reached the configured limit; "
+                        "no further tool operations were executed. Resume after correcting the model/tool output. "
+                        + self._failure_summary(report),
+                        report, turns,
+                    )
 
                 # v4: Immediate revalidation in repair mode after mutation ──────
                 if _repair_mode and _batch_has_mutation:
@@ -868,7 +911,7 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
             # Verification failed → enter / continue repair
             if repair_count >= self.repair_rounds:
                 return self._result(
-                    "needs_attention", final or "Verification still fails.", report, turns
+                    "needs_attention", self._failure_summary(report), report, turns
                 )
             repair_count += 1
             completion_candidate = False
@@ -895,8 +938,22 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
             turns,
         )
 
+    @staticmethod
+    def _failure_summary(report: Any) -> str:
+        if report is None:
+            return "NEEDS_ATTENTION: verification evidence is unavailable."
+        failed = [check for check in report.checks if check.verdict == "FAIL"]
+        names = ", ".join(check.name for check in failed) or "verification"
+        details = [redact(str(error).strip())[:220] for check in failed for error in check.errors if str(error).strip()]
+        missing = [item.split(": ", 1)[1] for item in details if item.startswith("required file is missing or empty: ")]
+        missing_note = f"Requested artifact not created: {', '.join(missing[:3])}. " if missing else ""
+        return (f"NEEDS_ATTENTION: GATES {names} FAIL. " + missing_note
+                + ("; ".join(details[:4]) if details else "Inspect verification evidence."))
+
     def _result(self, status: str, final: str, report: Any, turns: int) -> HarnessResult:
         verification = report.as_dict() if report else {"verdict": "MISSING", "checks": []}
+        if status == "completed" and verification["verdict"] != "PASS":
+            status, final = "needs_attention", self._failure_summary(report)
         tokens = max(1, self.usage["total_tokens"])
         metrics = {
             "wall_seconds": round(time.monotonic() - self._started_at, 3),

@@ -49,6 +49,7 @@ class Settings:
     visual_review: bool = True
     harness_mode: str = "auto"
     harness_max_turns: int = 80
+    invalid_tool_limit: int = 2
     compaction_reserve_tokens: int = 2048
     model_timeout_seconds: float = 720.0
     model_retries: int = 2
@@ -120,6 +121,8 @@ class Settings:
             raise ValueError("harness_mode solo, auto veya orchestra olmalı")
         if not 8 <= self.harness_max_turns <= 500:
             raise ValueError("harness_max_turns 8 ile 500 arasında olmalı")
+        if not 1 <= self.invalid_tool_limit <= 5:
+            raise ValueError("invalid_tool_limit 1 ile 5 arasında olmalı")
         if not 512 <= self.compaction_reserve_tokens <= 16384:
             raise ValueError("compaction_reserve_tokens 512 ile 16384 arasında olmalı")
         if not 60 <= self.model_timeout_seconds <= 3600:
@@ -203,6 +206,7 @@ def load_settings(path: Path = DEFAULT_CONFIG) -> Settings:
         "MODAI_BROWSER_QUALITY_GATE": ("browser_quality_gate", to_bool),
         "MODAI_MODE": ("harness_mode", str),
         "MODAI_HARNESS_MAX_TURNS": ("harness_max_turns", int),
+        "MODAI_INVALID_TOOL_LIMIT": ("invalid_tool_limit", int),
         "MODAI_COMPACTION_RESERVE_TOKENS": ("compaction_reserve_tokens", int),
         "MODAI_MODEL_TIMEOUT_SECONDS": ("model_timeout_seconds", float),
         "MODAI_MODEL_RETRIES": ("model_retries", int),

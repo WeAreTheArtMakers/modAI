@@ -28,6 +28,7 @@
   "visual_review": true,
   "harness_mode": "auto",
   "harness_max_turns": 80,
+  "invalid_tool_limit": 2,
   "compaction_reserve_tokens": 2048,
   "model_timeout_seconds": 720,
   "model_retries": 2,

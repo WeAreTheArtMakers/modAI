@@ -258,10 +258,12 @@ class TerminalUI:
         self._pending_tool_message = None
         self._pending_tool_count = 0
 
-    def final(self, text: str) -> None:
+    def final(self, text: str, status: str | None = None) -> None:
         self._stop_activity()
         self._flush_tool_event()
-        print("\n" + self.style(self.t("SONUÇ", "RESULT"), "bold", "green"))
+        attention = status is not None and status != "completed"
+        heading = self.t("DİKKAT GEREKİYOR", "NEEDS ATTENTION") if attention else self.t("SONUÇ", "RESULT")
+        print("\n" + self.style(heading, "bold", "yellow" if attention else "green"))
         print(text.strip(), flush=True)
 
     def request_cloud_budget(self, used: int, budget: int) -> int | None:
@@ -399,6 +401,7 @@ class Orchestrator:
         self._reference_task = ""
         self._hardware_parallel_limit: int | None = None
         self._active_harness: CodingHarness | None = None
+        self._last_harness_status: str | None = None
 
     def t(self, turkish: str, english: str) -> str:
         return language_text(self.settings.language, turkish, english)
@@ -1090,6 +1093,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         state["version"] = VERSION
 
     def run_task(self, user_task: str, write_allowed: bool | None = None, allow_cloud: bool = False) -> str:
+        self._last_harness_status = None
         # Concrete chat capability selects the new harness. Test doubles and legacy
         # subclasses without a model client keep the 4.x compatibility engine.
         if not self.settings.full_orchestra and callable(getattr(self.client, "chat", None)):
@@ -1118,11 +1122,13 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         return self._continue(run_dir, state)
 
     def resume(self, identifier: str | None = None, write_allowed: bool | None = None) -> str:
+        self._last_harness_status = None
         run_dir = self._resolve_run(identifier)
         state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
         if state.get("engine") == "coding-harness":
             if (state.get("status") == "completed" and state.get("verification", {}).get("verdict") == "PASS"
                     and state.get("mode") != "orchestra"):
+                self._last_harness_status = "completed"
                 return str(state.get("final", ""))
             return self._resume_harness(run_dir, state, write_allowed)
         if write_allowed is not None:
@@ -1384,6 +1390,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             compaction_reserve_tokens=self.settings.compaction_reserve_tokens,
             repair_rounds=self.settings.repair_rounds,
             max_turns=self.settings.harness_max_turns,
+            invalid_tool_limit=self.settings.invalid_tool_limit,
             model_retries=self.settings.model_retries,
             max_write_chars=16000,
             max_auto_skills=self.settings.max_auto_skills,
@@ -1439,6 +1446,7 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
                       "turns": result.turns, "metrics": result.metrics,
                       "updated_at": datetime.now().isoformat(timespec="seconds")})
         self._save_state(run_dir, state)
+        self._last_harness_status = result.status
         self._active_harness = None
         return result.final
 
@@ -3217,6 +3225,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-ctx", "--context-size", dest="context_size", type=int, help="Ollama num_ctx bağlamı (2048-131072)")
     parser.add_argument("--model-timeout", dest="model_timeout_seconds", type=float, help="Yerel model istek zaman aşımı, saniye (60-3600)")
     parser.add_argument("--model-retries", type=int, help="Geçici yerel model hatası yeniden denemesi (0-5)")
+    parser.add_argument("--invalid-tool-limit", type=int, help="Hatalı mutation aracı çağrısı üst sınırı (1-5)")
     parser.add_argument("--model-max-output", dest="model_max_output_tokens", type=int, help="Tek yerel yanıt üretim sınırı (256-8192)")
     parser.add_argument("--debate-rounds", type=int, help="Legacy full-orchestra debate rounds (0-20)")
     parser.add_argument("--repair-rounds", type=int, help="Düzeltme turu (0-20)")
@@ -3271,7 +3280,7 @@ def main(argv: list[str] | None = None) -> int:
             settings.trust_project_commands = True
         if args.resource_profile:
             settings.orchestra_resource_profile = args.resource_profile
-        for name in ('model_timeout_seconds', 'model_retries', 'model_max_output_tokens', 'context_size'):
+        for name in ('model_timeout_seconds', 'model_retries', 'model_max_output_tokens', 'context_size', 'invalid_tool_limit'):
             value = getattr(args, name)
             if value is not None:
                 setattr(settings, name, value)
@@ -3298,7 +3307,7 @@ def main(argv: list[str] | None = None) -> int:
             "max_agents", "max_hours", "max_total_tokens", "context_size", "debate_rounds",
             "repair_rounds", "max_tool_rounds", "agent_retries",
             "max_parallel_agents", "model_timeout_seconds", "model_retries",
-            "model_max_output_tokens",
+            "model_max_output_tokens", "invalid_tool_limit",
         ):
             value = getattr(args, name)
             if value is not None:
@@ -3330,14 +3339,20 @@ def main(argv: list[str] | None = None) -> int:
         elif args.list_runs:
             print(json.dumps(orchestrator.list_runs(), ensure_ascii=False, indent=2))
         elif args.resume is not None:
-            ui.final(orchestrator.resume(args.resume or None, write_allowed=True if args.allow_write else False if args.read_only else None))
+            answer = orchestrator.resume(args.resume or None, write_allowed=True if args.allow_write else False if args.read_only else None)
+            status = getattr(orchestrator, "_last_harness_status", None)
+            ui.final(answer, status=status)
+            return 0 if status in (None, "completed") else 1
         elif args.task:
             if args.allow_cloud and not orchestrator.settings.cloud_enabled:
                 raise ValueError("--allow-cloud için önce ana menüden veya /cloud setup ile bulut sağlayıcısını yapılandırın")
-            ui.final(orchestrator.run_task(
+            answer = orchestrator.run_task(
                 " ".join(args.task), write_allowed=False if args.read_only else True if args.allow_write else None,
                 allow_cloud=args.allow_cloud,
-            ))
+            )
+            status = getattr(orchestrator, "_last_harness_status", None)
+            ui.final(answer, status=status)
+            return 0 if status in (None, "completed") else 1
         elif interactive_terminal():
             dashboard_loop(orchestrator, ui, Dashboard(not args.no_color, language=settings.language))
         else:
