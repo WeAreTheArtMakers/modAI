@@ -19,6 +19,8 @@ jobs:
           cache: pip
       - name: Install Python dependencies
         run: python -m pip install -r requirements.txt
+      - name: Install ripgrep for coding-tool tests
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
       - name: Install Chromium for browser quality gates
         run: python -m playwright install --with-deps chromium
       - name: Run regression tests
