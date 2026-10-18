@@ -260,7 +260,8 @@ class CodingHarness(SkillPhase, BootstrapPhase, VerificationPhase, ModelPhase):
     @staticmethod
     def _compatibility_tool_call(response: ModelResponse) -> None:
         """Recover a single JSON tool call embedded in plain assistant text."""
-        if response.tool_calls or not response.content.strip():
+        if (response.tool_calls or not response.content.strip()
+                or response.error_code == "COMPATIBILITY_FINAL_TEXT"):
             return
         candidates = [response.content.strip()]
         candidates.extend(re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", response.content, re.S | re.I))

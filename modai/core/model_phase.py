@@ -2,6 +2,7 @@
 from __future__ import annotations
 import time
 from typing import Any
+from modai.models.ollama import ToolCompatibilityError
 from modai.security import redact
 
 
@@ -32,6 +33,13 @@ class ModelPhase:
                 )
                 if self.coding_tools.mutated_paths:
                     report = self._verify()
+                if isinstance(exc, ToolCompatibilityError):
+                    return None, report, self._result(
+                        "needs_attention",
+                        f"{exc} Session and completed file changes were preserved for resume.",
+                        report,
+                        turns,
+                    )
                 if not self._transient_model_error(exc) or retry >= self.model_retries:
                     return None, report, self._timeout_result(
                         exc, report, turns, completion_candidate=completion_candidate
