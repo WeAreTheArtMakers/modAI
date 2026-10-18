@@ -74,7 +74,7 @@ modai --mode orchestra "task"  # staged Adaptive Orchestra
 modai --full-orchestra "task"  # legacy 4.x planner/persona engine
 ```
 
-`orchestra` runs **Research → Code → Verify → Review → one optional repair → Final Verify**. Research has bounded read-only project/public-source tools; Code Virtuoso is the sole workspace writer in its existing persistent session. Verification uses current deterministic tests and browser gates without an extra model call. The independent local reviewer gets bounded excerpts of changed files and actual check results, with no tools. A blocking finding returns to the same coder for at most one review-driven repair cycle. Missing/failed evidence yields a resumable `needs_attention`, never a fictional PASS. `--full-orchestra` preserves the older 4.x planner/persona workflow.
+`orchestra` runs **Research → Code → Verify → Review → one optional repair → Final Verify**. Research has bounded read-only project/public-source tools; Code Virtuoso is the sole workspace writer in its existing persistent session. Verification uses current deterministic tests and browser gates without an extra model call. The independent local reviewer gets bounded excerpts of changed files and actual check results, with no tools. An invalid reviewer response gets at most one local retry; two invalid responses yield `needs_attention`, never an invented PASS. A blocking finding returns to the same coder for at most one review-driven repair cycle. `--full-orchestra` preserves the older 4.x planner/persona workflow.
 
 All MODAI-owned local generation in this staged path passes through one FIFO scheduler (concurrency **1**). This does not control other Ollama clients or guarantee that a model fits in memory. Research and review may make separate calls to the same selected model; no extra model is loaded or downloaded. `auto` still prefers `solo` for simple work.
 
@@ -102,7 +102,7 @@ Full command output is written under the run’s `logs/` directory. The model se
 
 Every 5.x run has a `state.json` summary and an append-only `session.jsonl` transcript under `memory/runs/<RUN_ID>/`.
 
-Adaptive Orchestra additionally writes `tasks.sqlite3` in that run directory. The database stores six stable stage IDs, dependencies, role permissions, bounded summaries, artifact hashes and verification checkpoints; it does **not** copy complete conversations. `session.jsonl` remains authoritative, and the index can be rebuilt from completed stage records after an interruption. On resume, completed research and code stages are not blindly rerun; the final quality gate runs against current files. Both transcript and index are private run data—protect the workspace and backups accordingly.
+Adaptive Orchestra additionally writes `tasks.sqlite3` in that run directory. The database stores six stable stage IDs, dependencies, role permissions, bounded summaries, artifact hashes and verification checkpoints; it does **not** copy complete conversations. `session.jsonl` remains authoritative, and the index can be rebuilt from completed stage records after an interruption. On resume, completed research and code stages are not blindly rerun. A changed output is reverified and rereviewed; a missing output yields `needs_attention`. Even a previously completed run rechecks the final gate against current files. Both transcript and index are private run data—protect the workspace and backups accordingly.
 
 ```bash
 modai --list-runs
@@ -164,7 +164,7 @@ modai --max-hours 24 "TASK"             # legacy engine active-time guard
 
 Run these commands **inside your real project directory**, or add `--workspace "$PWD"` there. Paths such as `/path/to/project` in examples are placeholders, not directories MODAI creates for you. An explicit `--workspace` must already exist; an invalid path produces a short error without a Python traceback.
 
-Adaptive Orchestra defaults to `balanced`: context stays at 8192 unless measured memory headroom supports the requested 16384. `fast` caps at 8192. `extended` may allow up to 32768 only with at least 24 GB total memory and measured headroom; it will **not** activate a larger context on an M1 Pro 16 GB. These are conservative context targets, not measured KV-cache allocations. When telemetry is unavailable MODAI stays at 8192; when measured free memory falls below 5%, it pauses before the next model call and keeps durable session state. The TUI orchestration profile also exposes these two new settings.
+Adaptive Orchestra defaults to `balanced`: context stays at 8192 unless measured memory headroom supports the requested 16384. `fast` caps at 8192. `extended` may allow up to 32768 only with at least 24 GB total memory and measured headroom; it will **not** activate a larger context on an M1 Pro 16 GB. These are conservative context targets, not measured KV-cache allocations. When telemetry is unavailable MODAI stays at 8192. On macOS it pauses before a new model call below 12% reported free memory, or below 25% with at least 64 recent swap-out pages per second. Allocated swap alone is reported but does not trigger a pause. The TUI orchestration profile also exposes these settings.
 
 In staged mode, discovered project test/build scripts are **not** run by default; that is a truthful failed verification gate, not a skipped PASS. Review scripts in a trusted workspace before enabling `--trust-project-commands` or `MODAI_TRUST_PROJECT_COMMANDS=true`. This permission flag is not OS isolation: use a separate account/container for untrusted code. SOLO/AUTO keep their pre-5.3 project-command behavior for compatibility.
 
@@ -341,6 +341,8 @@ Older keys remain readable. `max_total_tokens` is retained as the storage/CLI co
 ```
 
 The deterministic suite uses a scripted fake runtime and covers the persistent loop, native tools, atomic edits, truncated responses, no-progress recovery, resume, compaction, queues, permissions, routing, latest validation evidence, a real landing-page browser E2E fixture, a repair fixture, and legacy orchestra regression. Version 5.3 adds staged-orchestra, one-writer, read-only review, JSONL index recovery, scheduler pressure/FIFO, mocked gateway and Chromium fixture tests. A short real-model smoke proves local Ollama transport and scheduling only; it is not a guarantee that every model/task will finish on 16 GB.
+
+Pull requests run the same Python regression suite on GitHub Actions with Chromium installed. The workflow is a separate CI environment, not an Ollama or Apple Silicon benchmark; check the PR status before treating it as passed.
 
 Run the optional local-model benchmark:
 

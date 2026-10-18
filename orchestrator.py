@@ -1121,7 +1121,8 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
         run_dir = self._resolve_run(identifier)
         state = json.loads((run_dir / "state.json").read_text(encoding="utf-8"))
         if state.get("engine") == "coding-harness":
-            if state.get("status") == "completed" and state.get("verification", {}).get("verdict") == "PASS":
+            if (state.get("status") == "completed" and state.get("verification", {}).get("verdict") == "PASS"
+                    and state.get("mode") != "orchestra"):
                 return str(state.get("final", ""))
             return self._resume_harness(run_dir, state, write_allowed)
         if write_allowed is not None:
@@ -1358,7 +1359,8 @@ gereken güvenli test komutlarını içermeli; tahminî dosya adı veya shell me
             state.setdefault("orchestra", {}).update({
                 "effective_context": context_size, "local_inference_concurrency": 1,
                 "memory": {"total_bytes": snapshot.total_bytes, "free_percent": snapshot.free_percent,
-                           "source": snapshot.source},
+                           "source": snapshot.source, "swap_used_bytes": snapshot.swap_used_bytes,
+                           "swapout_pages_per_second": snapshot.swapout_pages_per_second},
             })
             self.event("score", f"MODEL {self.settings.model} · CTX {context_size} · LOCAL 1")
             if warning:

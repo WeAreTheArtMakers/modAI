@@ -15,8 +15,9 @@ from modai.core.harness import CodingHarness
 from modai.models.base import ModelResponse, ToolCall, Usage
 from modai.models.fake import ScriptedRuntime
 from modai.orchestration.coordinator import AdaptiveOrchestra
+from modai.orchestration.reviewer import ReadOnlyReviewer, ReviewError
 from modai.orchestration.scheduler import (InferencePaused, LocalInferenceScheduler,
-                                           ResourceSnapshot, effective_context)
+                                           ResourceSnapshot, effective_context, mac_resource_snapshot)
 from modai.orchestration.task_index import RunIndex
 from modai.tools.gateway import ToolEntry, ToolGateway, ToolGatewayError
 
@@ -133,6 +134,80 @@ def test_recovery_skips_completed_research_and_keeps_first_mutation(tmp_path: Pa
                    for call in getattr(response, 'tool_calls', []))
 
 
+def _completed_note(tmp_path: Path):
+    task = 'Build note.md'
+    first, _runtime, harness, _state, _progress = _orchestra(tmp_path, [
+        ModelResponse(content='Offline note requirements.'),
+        ModelResponse(tool_calls=[_call(1, 'write', path='note.md', content='original\n')]),
+        ModelResponse(content='Implemented note.md.'),
+        _review(['note.md']),
+    ], task)
+    result = first.run()
+    assert result.status == 'completed'
+    return task, result, harness
+
+
+def _resume_completed_note(tmp_path: Path, task: str, previous, previous_harness,
+                           responses: list[ModelResponse]):
+    resumed, runtime, harness, state, progress = _orchestra(tmp_path, responses, task,
+                                                              run_dir=tmp_path / '.run')
+    harness.coding_tools.mutated_paths.update(previous_harness.coding_tools.mutated_paths)
+    harness.verifier.sequence = previous.verification['sequence']
+    state['verification'] = previous.verification
+    state['changed_paths'] = previous.changed_paths
+    return resumed, runtime, harness, state, progress
+
+
+def test_completed_stage_rechecks_changed_file_and_reviews_current_content(tmp_path: Path):
+    task, previous, old_harness = _completed_note(tmp_path)
+    (tmp_path / 'note.md').write_text('externally changed\n')
+    resumed, runtime, _harness, _state, progress = _resume_completed_note(
+        tmp_path, task, previous, old_harness, [_review(['note.md'])])
+    result = resumed.run(resume=True)
+    assert result.status == 'completed', result.final
+    assert len(runtime.requests) == 1  # no research or coder replay; fresh reviewer only
+    assert 'externally changed' in runtime.requests[0]['messages'][1]['content']
+    assert any(label == 'REVIEWING' for label, _ in progress)
+    assert result.verification['sequence'] > previous.verification['sequence']
+
+
+def test_missing_output_never_reuses_completed_final_verification(tmp_path: Path):
+    task, previous, old_harness = _completed_note(tmp_path)
+    (tmp_path / 'note.md').unlink()
+    resumed, runtime, _harness, _state, _progress = _resume_completed_note(
+        tmp_path, task, previous, old_harness, [])
+    result = resumed.run(resume=True)
+    assert result.status == 'needs_attention'
+    assert result.verification['verdict'] == 'FAIL'
+    assert any(check['name'] == 'artifact_integrity' for check in result.verification['checks'])
+    assert not runtime.requests  # never blindly rerun the writer
+    assert not (tmp_path / 'note.md').exists()
+
+
+def test_interrupted_review_resume_preserves_completed_write(tmp_path: Path):
+    task = 'Build note.md'
+    first, _runtime, harness, _state, _progress = _orchestra(tmp_path, [
+        ModelResponse(content='Offline note requirements.'),
+        ModelResponse(tool_calls=[_call(1, 'write', path='note.md', content='kept\n')]),
+        ModelResponse(content='Implemented note.md.'), KeyboardInterrupt(),
+    ], task)
+    with pytest.raises(KeyboardInterrupt):
+        first.run()
+    assert (tmp_path / 'note.md').read_text() == 'kept\n'
+    verification = next(record['report'] for record in reversed(harness.session.records())
+                        if record.get('type') == 'verification')
+    resumed, runtime, second_harness, state, _progress = _orchestra(tmp_path, [
+        _review(['note.md']),
+    ], task, run_dir=tmp_path / '.run')
+    second_harness.coding_tools.mutated_paths.update(harness.coding_tools.mutated_paths)
+    state['verification'] = verification
+    result = resumed.run(resume=True)
+    assert result.status == 'completed', result.final
+    assert (tmp_path / 'note.md').read_text() == 'kept\n'
+    assert len(runtime.requests) == 1
+    assert runtime.requests[0]['tools'] == []
+
+
 def test_scheduler_serializes_fifo_requests_and_reports_pressure():
     class SlowRuntime:
         provider, model, supports_native_tools = 'local', 'test', True
@@ -201,6 +276,98 @@ def test_scheduler_cancellation_and_queue_timeout():
     first.join(2)
 
 
+def test_active_swap_pressure_pauses_but_allocated_swap_alone_does_not():
+    runtime = ScriptedRuntime([ModelResponse(content='allowed'), ModelResponse(content='unknown telemetry')])
+    snapshot = ResourceSnapshot(16 * 1024**3, 12, 'test',
+                                swap_used_bytes=10 * 1024**3, swapout_pages_per_second=0)
+    scheduler = LocalInferenceScheduler(runtime, probe=lambda: snapshot)
+    assert scheduler.generate([], []).content == 'allowed'
+    active = LocalInferenceScheduler(runtime, probe=lambda: ResourceSnapshot(
+        16 * 1024**3, 12, 'test', swap_used_bytes=10 * 1024**3,
+        swapout_pages_per_second=128))
+    with pytest.raises(InferencePaused, match='swap'):
+        active.generate([], [])
+    critical = LocalInferenceScheduler(runtime, probe=lambda: ResourceSnapshot(
+        16 * 1024**3, 6, 'test', swapout_pages_per_second=0))
+    with pytest.raises(InferencePaused, match='free memory'):
+        critical.generate([], [])
+    unavailable = LocalInferenceScheduler(runtime, probe=lambda: ResourceSnapshot())
+    assert unavailable.generate([], []).content == 'unknown telemetry'
+    assert len(runtime.requests) == 2
+
+
+def test_mac_resource_probe_reports_recent_swap_activity_separately_from_allocation():
+    class Result:
+        returncode = 0
+
+        def __init__(self, stdout):
+            self.stdout = stdout
+
+    def command(argv, **_kwargs):
+        if argv == ['sysctl', '-n', 'hw.memsize']:
+            return Result(str(16 * 1024**3))
+        if argv == ['memory_pressure', '-Q']:
+            return Result('System-wide memory free percentage: 12%\n')
+        if argv == ['sysctl', 'vm.swapusage']:
+            return Result('vm.swapusage: total = 11264.00M used = 9000.00M free = 2264.00M')
+        if argv == ['vm_stat', '-c', '2', '1']:
+            return Result('free active swapouts\n100 200 500000\n90 210 128\n')
+        raise AssertionError(argv)
+
+    with patch('modai.orchestration.scheduler.sys.platform', 'darwin'), patch(
+            'modai.orchestration.scheduler.subprocess.run', side_effect=command):
+        snapshot = mac_resource_snapshot()
+    assert snapshot.free_percent == 12
+    assert snapshot.swap_used_bytes == 9000 * 1024**2
+    assert snapshot.swapout_pages_per_second == 128
+
+
+@pytest.mark.parametrize('bad', [
+    ModelResponse(content='not JSON', usage=Usage(4, 2)),
+    ModelResponse(content='', usage=Usage(4, 0)),
+    ModelResponse(content='{"findings": []}', truncated=True, usage=Usage(4, 5)),
+    ModelResponse(content=json.dumps({'reviewed_files': ['note.md'], 'summary': 'Inspected note.',
+                                      'findings': [{'severity': 'blocking', 'issue': 'missing file ref'}]}),
+                  usage=Usage(4, 8)),
+])
+def test_reviewer_retries_once_without_inventing_pass(tmp_path: Path, bad: ModelResponse):
+    (tmp_path / 'note.md').write_text('real file\n')
+    runtime = ScriptedRuntime([bad, _review(['note.md'])])
+    reviewer = ReadOnlyReviewer(runtime, tmp_path, tmp_path / '.run')
+    result = reviewer.review('Inspect note.md', ['note.md'], {'checks': [], 'verdict': 'PASS'})
+    assert result['findings'] == []
+    assert len(runtime.requests) == 2
+    assert all(request['tools'] == [] for request in runtime.requests)
+    assert result['_usage']['input_tokens'] >= bad.usage.input_tokens
+
+
+def test_reviewer_two_invalid_responses_preserve_error_and_usage(tmp_path: Path):
+    (tmp_path / 'note.md').write_text('real file\n')
+    runtime = ScriptedRuntime([ModelResponse(content='invalid', usage=Usage(3, 2)),
+                               ModelResponse(content='', usage=Usage(5, 1))])
+    reviewer = ReadOnlyReviewer(runtime, tmp_path, tmp_path / '.run')
+    with pytest.raises(ReviewError) as error:
+        reviewer.review('Inspect note.md', ['note.md'], {'checks': [], 'verdict': 'PASS'})
+    assert len(runtime.requests) == 2
+    assert error.value.usage['input_tokens'] == 8
+
+
+def test_orchestra_failed_review_is_needs_attention_with_code_preserved(tmp_path: Path):
+    coordinator, runtime, _harness, _state, _progress = _orchestra(tmp_path, [
+        ModelResponse(content='Offline note requirements.'),
+        ModelResponse(tool_calls=[_call(1, 'write', path='note.md', content='kept\n')]),
+        ModelResponse(content='Implemented note.md.'),
+        ModelResponse(content='bad review', usage=Usage(3, 2)),
+        ModelResponse(content='', usage=Usage(5, 1)),
+    ], 'Build note.md')
+    result = coordinator.run()
+    assert result.status == 'needs_attention'
+    assert 'review' in result.final
+    assert (tmp_path / 'note.md').read_text() == 'kept\n'
+    assert result.metrics['orchestra_stages']['code'] == 'completed'
+    assert result.usage['local_tokens'] >= 11
+
+
 def test_task_index_skips_sensitive_artifacts_and_replays_jsonl(tmp_path: Path):
     from modai.core.session import SessionStore
 
@@ -225,6 +392,19 @@ def test_task_index_skips_sensitive_artifacts_and_replays_jsonl(tmp_path: Path):
     with sqlite3.connect(run / 'tasks.sqlite3') as db:
         assert db.execute('SELECT path, sha256 FROM artifacts').fetchall() == [('note.md', 'b' * 64)]
     rebuilt.close()
+
+
+def test_task_index_detects_changed_and_deleted_artifact_hashes(tmp_path: Path):
+    (tmp_path / 'note.md').write_text('first\n')
+    index = RunIndex(tmp_path / '.run', tmp_path)
+    hashes = index.record_artifacts(['note.md'])
+    assert index.artifact_changes(['note.md']) == {}
+    (tmp_path / 'note.md').write_text('second\n')
+    assert index.artifact_changes(['note.md']) == {'note.md': 'changed'}
+    assert index.artifact_changes(['note.md'], expected=hashes) == {'note.md': 'changed'}
+    (tmp_path / 'note.md').unlink()
+    assert index.artifact_changes(['note.md']) == {'note.md': 'missing'}
+    index.close()
 
 
 def test_gateway_mock_read_only_denies_write_and_external():
@@ -291,12 +471,18 @@ def test_orchestrator_explicit_mode_uses_staged_pipeline_and_auto_stays_solo(tmp
     with patch('orchestrator.RUNS', tmp_path / 'runs'):
         final = agent.run_task('Build note.md')
         run = agent.list_runs()[0]
+        assert len(client.requests) == 4
+        (workspace / 'note.md').write_text('external update\n')
+        client.responses.append(raw(review))
+        resumed_final = agent.resume(run['id'])
     state = json.loads((Path(run['path']) / 'state.json').read_text())
     assert 'Adaptive Orchestra completed' in final
+    assert 'Adaptive Orchestra completed' in resumed_final
     assert state['status'] == 'completed' and state['mode'] == 'orchestra'
     assert state['orchestra']['effective_context'] == 8192
-    assert (workspace / 'note.md').read_text() == 'ready\n'
-    assert len(client.requests) == 4
+    assert (workspace / 'note.md').read_text() == 'external update\n'
+    assert len(client.requests) == 5  # completed run revalidated; writer was not replayed
+    assert 'external update' in json.dumps(client.requests[-1]['messages'])
     assert (Path(run['path']) / 'tasks.sqlite3').is_file()
 
     for requested in ('solo', 'auto'):

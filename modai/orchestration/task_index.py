@@ -117,6 +117,33 @@ class RunIndex:
                                 (relative, digest, stage, _now()))
         return hashes
 
+    def current_artifact_hashes(self, paths: list[str]) -> dict[str, str]:
+        """Hash bounded, permitted outputs without changing their recorded provenance."""
+        hashes: dict[str, str] = {}
+        for name in sorted(set(paths)):
+            path = self.workspace / name
+            if (path.is_symlink() or sensitive_path(path, self.workspace) or not path.is_file()
+                    or path.stat().st_size > 5_000_000):
+                continue
+            hashes[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        return hashes
+
+    def artifact_changes(self, paths: list[str], *, expected: dict[str, str] | None = None) -> dict[str, str]:
+        """Compare current outputs with the last durable content hashes, including deletions."""
+        if expected is None:
+            expected = dict(self.db.execute("SELECT path,sha256 FROM artifacts"))
+        names = sorted(set(paths) | set(expected))
+        current = self.current_artifact_hashes(names)
+        changes: dict[str, str] = {}
+        for name in names:
+            if not (self.workspace / name).exists():
+                changes[name] = "missing"
+            elif name not in expected or name not in current:
+                changes[name] = "unverifiable"
+            elif current[name] != expected[name]:
+                changes[name] = "changed"
+        return changes
+
     def recover(self, records: list[dict[str, Any]]) -> None:
         """Rebuild the disposable index from authoritative JSONL stage records."""
         with self.db:

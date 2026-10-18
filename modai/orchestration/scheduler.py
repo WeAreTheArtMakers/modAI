@@ -23,6 +23,8 @@ class ResourceSnapshot:
     total_bytes: int | None = None
     free_percent: int | None = None
     source: str = "unavailable"
+    swap_used_bytes: int | None = None  # allocation only; never a pause criterion by itself
+    swapout_pages_per_second: int | None = None  # recent activity, not cumulative swap use
 
 
 def mac_resource_snapshot() -> ResourceSnapshot:
@@ -31,6 +33,8 @@ def mac_resource_snapshot() -> ResourceSnapshot:
         return ResourceSnapshot()
     total = None
     free = None
+    swap_used = None
+    swapouts = None
     try:
         result = subprocess.run(["sysctl", "-n", "hw.memsize"], capture_output=True,
                                 text=True, timeout=2, check=False)
@@ -41,12 +45,39 @@ def mac_resource_snapshot() -> ResourceSnapshot:
     try:
         result = subprocess.run(["memory_pressure", "-Q"], capture_output=True,
                                 text=True, timeout=3, check=False)
-        match = re.search(r"System-wide free percentage:\s*(\d+)%", result.stdout)
+        match = re.search(r"System-wide(?: memory)? free percentage:\s*(\d+)%", result.stdout)
         if result.returncode == 0 and match:
             free = max(0, min(int(match.group(1)), 100))
     except (OSError, subprocess.TimeoutExpired):
         pass
-    return ResourceSnapshot(total, free, "macOS memory_pressure" if free is not None else "unavailable")
+    try:
+        result = subprocess.run(["sysctl", "vm.swapusage"], capture_output=True,
+                                text=True, timeout=2, check=False)
+        match = re.search(r"\bused\s*=\s*([\d.]+)([MG])", result.stdout)
+        if result.returncode == 0 and match:
+            swap_used = int(float(match.group(1)) * (1024**2 if match.group(2) == "M" else 1024**3))
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        pass
+    # A one-second sample is only useful near pressure; cumulative swap
+    # allocation can remain high long after the active paging has stopped.
+    if free is not None and 5 <= free < 25:
+        try:
+            result = subprocess.run(["vm_stat", "-c", "2", "1"], capture_output=True,
+                                    text=True, timeout=3, check=False)
+            lines = [line.split() for line in result.stdout.splitlines() if line.strip()]
+            header = next((parts for parts in lines if "swapouts" in parts), None)
+            if result.returncode == 0 and header is not None:
+                samples = [parts for parts in lines[lines.index(header) + 1:]
+                           if len(parts) == len(header)]
+                if len(samples) >= 2:
+                    token = samples[-1][header.index("swapouts")]
+                    if re.fullmatch(r"\d+", token):
+                        swapouts = int(token)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return ResourceSnapshot(total, free,
+                            "macOS memory_pressure" + (" + vm_stat" if swapouts is not None else "")
+                            if free is not None else "unavailable", swap_used, swapouts)
 
 
 def effective_context(requested: int, profile: str, snapshot: ResourceSnapshot) -> tuple[int, str | None]:
@@ -70,7 +101,7 @@ class LocalInferenceScheduler:
     def __init__(self, runtime: ModelRuntime, *, max_waiters: int = 8,
                  wait_timeout: float = 720.0,
                  probe: Callable[[], ResourceSnapshot] = mac_resource_snapshot,
-                 minimum_free_percent: int = 5) -> None:
+                 minimum_free_percent: int = 12) -> None:
         self.runtime = runtime
         self.provider = runtime.provider
         self.model = runtime.model
@@ -133,6 +164,12 @@ class LocalInferenceScheduler:
             snapshot = self.probe()
             if snapshot.free_percent is not None and snapshot.free_percent < self.minimum_free_percent:
                 self.paused_reason = f"measured free memory {snapshot.free_percent}% below {self.minimum_free_percent}%"
+                raise InferencePaused(self.paused_reason)
+            if (snapshot.free_percent is not None and snapshot.free_percent < 25
+                    and snapshot.swapout_pages_per_second is not None
+                    and snapshot.swapout_pages_per_second >= 64):
+                self.paused_reason = (f"active swap pressure: {snapshot.swapout_pages_per_second} "
+                                      f"pages/s at {snapshot.free_percent}% free memory")
                 raise InferencePaused(self.paused_reason)
             kwargs = {"on_text": on_text, "max_output_tokens": max_output_tokens}
             if self._reduced_context:

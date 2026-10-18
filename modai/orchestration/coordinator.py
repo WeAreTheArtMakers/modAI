@@ -77,6 +77,36 @@ class AdaptiveOrchestra:
                 int(usage.get("input_tokens", 0)), int(usage.get("output_tokens", 0))
             )), str(usage.get("provider", "local")))
 
+    def _tracked_paths(self) -> list[str]:
+        paths = set(self.harness.coding_tools.mutated_paths)
+        for stage in ("code", "repair"):
+            artifact_paths = self._artifact(stage).get("paths", [])
+            if isinstance(artifact_paths, list):
+                paths.update(path for path in artifact_paths if isinstance(path, str))
+        return sorted(paths)
+
+    @staticmethod
+    def _integrity_report(report: dict[str, Any], changes: dict[str, str]) -> dict[str, Any]:
+        if not changes:
+            return report
+        current = {**report, "verdict": "FAIL", "checks": list(report.get("checks", []))}
+        current["checks"].append({"name": "artifact_integrity", "verdict": "FAIL",
+                                  "errors": [f"{path}: {reason}" for path, reason in sorted(changes.items())[:12]],
+                                  "details": {"changed_count": len(changes)}})
+        return current
+
+    def _review(self, paths: list[str], verification: dict[str, Any]) -> dict[str, Any]:
+        before = self.index.current_artifact_hashes(paths)
+        reviewer = ReadOnlyReviewer(self.scheduler, self.workspace, self.run_dir / "review-logs",
+                                    self.privacy_profile)
+        review = reviewer.review(self.task, paths, verification)
+        self._account(review.pop("_usage", None))
+        after = self.index.current_artifact_hashes(paths)
+        if before != after:
+            raise ReviewError("workspace outputs changed during read-only review")
+        review["hashes"] = after
+        return review
+
     def _outcome(self, status: str, message: str, verification: dict[str, Any] | None = None,
                  prior: HarnessResult | None = None) -> HarnessResult:
         report = verification or self.state.get("verification", {"verdict": "MISSING", "checks": []})
@@ -144,33 +174,46 @@ class AdaptiveOrchestra:
                 self._finish("code", "completed", "Code Virtuoso produced verified files",
                              {"paths": prior.changed_paths, "hashes": hashes,
                               "verification": prior.verification.get("verdict")})
+            tracked_paths = self._tracked_paths()
+            self.harness.coding_tools.mutated_paths.update(tracked_paths)
+            last_final = self._artifact("final_verify")
+            baseline = last_final.get("hashes") if isinstance(last_final.get("hashes"), dict) else None
+            drift = self.index.artifact_changes(tracked_paths, expected=baseline)
+            previous_review = self._artifact("review")
+            review_needs_refresh = (bool(drift) or not isinstance(previous_review.get("hashes"), dict))
             current = "verify"
-            if self.index.state("verify") != "completed":
+            if (self.index.state("verify") != "completed" or drift
+                    or (prior is None and (review_needs_refresh or self.index.state("review") != "completed"))):
                 self._stage("verify", "VERIFYING")
-                # CodingHarness already ran the deterministic worker at its completion
-                # candidate. Reuse that current report; do not spend a model call.
-                verification = prior.verification if prior else self.state.get("verification", {})
+                # Reuse only the report from this invocation's coder. A resumed
+                # task needs a fresh deterministic report before stale review data.
+                verification = prior.verification if prior and not drift else self.harness._verify().as_dict()
+                integrity = {path: reason for path, reason in drift.items()
+                             if reason in {"missing", "unverifiable"}}
+                verification = self._integrity_report(verification, integrity)
+                self.state["verification"] = verification
                 if verification.get("verdict") != "PASS":
-                    self._finish("verify", "needs_attention", "Deterministic checks did not pass")
-                    return self._outcome("needs_attention", "Verification evidence is missing or failed", verification, prior)
+                    self._finish("verify", "needs_attention", "Current checks or output integrity did not pass")
+                    return self._outcome("needs_attention", "Current verification or output integrity failed",
+                                         verification, prior)
                 self.index.checkpoint("verify", "PASS", "Coder completion gates passed")
                 self._finish("verify", "completed", "Current deterministic checks PASS",
                              {"sequence": verification.get("sequence"), "verdict": "PASS"})
             else:
                 verification = prior.verification if prior else self.state.get("verification", {})
             current = "review"
-            if self.index.state("review") != "completed":
+            if self.index.state("review") != "completed" or review_needs_refresh:
                 self._stage("review", "REVIEWING")
-                reviewer = ReadOnlyReviewer(self.scheduler, self.workspace, self.run_dir / "review-logs",
-                                            self.privacy_profile)
-                review = reviewer.review(self.task, sorted(self.harness.coding_tools.mutated_paths), verification)
-                self._account(review.pop("_usage", None))
+                review = self._review(tracked_paths, verification)
                 self._finish("review", "completed", review["summary"], review)
             else:
-                review = self._artifact("review")
+                review = previous_review
             blocking = [f for f in review.get("findings", []) if f.get("severity") == "blocking"]
             if blocking:
                 current = "repair"
+                if self.index.state("repair") == "completed" and review_needs_refresh:
+                    return self._outcome("needs_attention", "New review findings remain after the one repair cycle; "
+                                         "manual direction is required", verification, prior)
                 if self.index.state("repair") != "completed":
                     self._stage("repair", "REPAIRING")
                     feedback = {"role": "user", "content": (
@@ -191,37 +234,41 @@ class AdaptiveOrchestra:
                     self._finish("repair", "completed", "One repair cycle completed with current gates PASS",
                                  {"paths": prior.changed_paths, "hashes": hashes})
                     verification = prior.verification
+                    tracked_paths = self._tracked_paths()
                 repair_artifact = self._artifact("repair")
-                if "remaining_findings" in repair_artifact:
+                if ("remaining_findings" in repair_artifact
+                        and isinstance(repair_artifact.get("reviewed_hashes"), dict)):
                     remaining = repair_artifact["remaining_findings"]
+                    review_hashes = repair_artifact["reviewed_hashes"]
                 else:
-                    reviewer = ReadOnlyReviewer(self.scheduler, self.workspace, self.run_dir / "review-logs",
-                                                self.privacy_profile)
-                    re_review = reviewer.review(self.task, sorted(self.harness.coding_tools.mutated_paths), verification)
-                    self._account(re_review.pop("_usage", None))
+                    re_review = self._review(tracked_paths, verification)
                     remaining = [f for f in re_review["findings"] if f["severity"] == "blocking"]
+                    review_hashes = re_review["hashes"]
                     self._finish("repair", "completed", "Post-repair read-only review recorded",
-                                 {"remaining_findings": remaining})
+                                 {"remaining_findings": remaining, "reviewed_hashes": review_hashes})
                 if remaining:
                     return self._outcome("needs_attention", "Material review findings remain after one repair cycle",
                                          verification, prior)
-            elif self.index.state("repair") != "skipped":
-                self._finish("repair", "skipped", "No material review finding")
-            current = "final_verify"
-            if self.index.state("final_verify") != "completed":
-                self._stage("final_verify", "VERIFYING")
-                final_report = self.harness._verify()  # deterministic; no model call
-                verification = final_report.as_dict()
-                self.index.checkpoint("final_verify", final_report.verdict,
-                                      "; ".join(final_report.errors[:4]) or "Current quality gates passed")
-                self._finish("final_verify", "completed" if final_report.verdict == "PASS" else "needs_attention",
-                             "Final verification " + final_report.verdict,
-                             {"sequence": final_report.sequence, "verdict": final_report.verdict})
-                if final_report.verdict != "PASS":
-                    return self._outcome("needs_attention", "Final verification failed: " +
-                                         "; ".join(final_report.errors[:4]), verification, prior)
             else:
-                verification = self.state.get("verification", verification)
+                review_hashes = review.get("hashes", {})
+                if self.index.state("repair") != "skipped" and self.index.state("repair") != "completed":
+                    self._finish("repair", "skipped", "No material review finding")
+            current = "final_verify"
+            self._stage("final_verify", "VERIFYING")
+            final_report = self.harness._verify()  # always current; no model call
+            verification = final_report.as_dict()
+            final_changes = self.index.artifact_changes(tracked_paths, expected=review_hashes)
+            verification = self._integrity_report(verification, final_changes)
+            self.state["verification"] = verification
+            self.index.checkpoint("final_verify", verification["verdict"],
+                                  "; ".join(final_report.errors[:4]) or "Current quality gates checked")
+            self._finish("final_verify", "completed" if verification["verdict"] == "PASS" else "needs_attention",
+                         "Final verification " + verification["verdict"],
+                         {"sequence": verification.get("sequence"), "verdict": verification["verdict"],
+                          "hashes": self.index.current_artifact_hashes(tracked_paths)})
+            if verification["verdict"] != "PASS":
+                return self._outcome("needs_attention", "Final verification or output integrity failed",
+                                     verification, prior)
             self.progress("COMPLETED", "All stages completed with current verification")
             return self._outcome("completed", "Adaptive Orchestra completed; research, code, review and final gates passed",
                                  verification, prior)
@@ -232,6 +279,8 @@ class AdaptiveOrchestra:
             self.progress("PAUSED", str(exc))
             return self._outcome("paused", str(exc), prior=prior)
         except (ReviewError, OSError, RuntimeError, ValueError, PermissionError) as exc:
+            if isinstance(exc, ReviewError):
+                self._account(exc.usage)
             self._finish(current, "needs_attention", f"{type(exc).__name__}: {redact(str(exc))[:500]}")
             self.progress("NEEDS_ATTENTION", str(exc)[:160])
             return self._outcome("needs_attention", f"{current}: {redact(str(exc))[:500]}", prior=prior)
